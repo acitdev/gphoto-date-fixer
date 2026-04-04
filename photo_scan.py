@@ -337,6 +337,77 @@ def match_metadata_to_media(conn: sqlite3.Connection):
         matched += pass2_matched
         print(f"  ✅ Pass 2 จับคู่เพิ่ม: {pass2_matched:,} ไฟล์")
 
+    # === Pass 3: วิดีโอ Live Photo ใช้ JSON ร่วมกับภาพ ===
+    # Google Takeout ไม่สร้าง JSON แยกสำหรับวิดีโอ Live Photo
+    # เช่น IMG_0017.JPG.supplemental-metadata.json → title: IMG_0017.JPG
+    #      IMG_0017.JPG ได้จับคู่กับ JSON แล้ว
+    #      IMG_0017.MP4 ไม่มี JSON → ต้องเอา JSON ของ IMG_0017.JPG มาใช้ร่วม
+    #
+    # กลยุทธ์: หาวิดีโอที่ยังไม่มี JSON แล้ว stem ตรงกับภาพที่มี JSON แล้ว
+    # (รองรับทั้ง exact stem และ prefix match)
+    print("  🔄 Pass 3: จับคู่วิดีโอ Live Photo กับ JSON ของภาพ...")
+
+    cursor.execute("""
+        SELECT id, stem, year_folder FROM media_files
+        WHERE is_video = 1 AND json_metadata_id IS NULL
+    """)
+    orphan_videos = cursor.fetchall()
+
+    if orphan_videos:
+        # ดึงภาพที่มี JSON แล้ว เพื่อใช้เป็นตัวกลาง
+        cursor.execute("""
+            SELECT id, stem, year_folder, json_metadata_id FROM media_files
+            WHERE is_image = 1 AND json_metadata_id IS NOT NULL
+        """)
+        matched_images = cursor.fetchall()
+
+        # สร้าง lookup: (year, stem) → json_metadata_id (exact)
+        # และ list สำหรับ prefix match
+        from collections import defaultdict
+        exact_lookup = {}
+        prefix_candidates = defaultdict(list)
+        for img in matched_images:
+            key = (img["year_folder"], img["stem"])
+            exact_lookup[key] = img["json_metadata_id"]
+            prefix_candidates[img["year_folder"]].append({
+                "stem": img["stem"],
+                "json_id": img["json_metadata_id"],
+            })
+
+        pass3_matched = 0
+        for vid in orphan_videos:
+            vid_stem = vid["stem"]
+            year = vid["year_folder"]
+            json_id = None
+
+            # 3a: exact stem match
+            json_id = exact_lookup.get((year, vid_stem))
+
+            # 3b: prefix match (ถ้า exact ไม่เจอ)
+            if json_id is None and len(vid_stem) >= 10:
+                best_len = 0
+                for img in prefix_candidates.get(year, []):
+                    img_stem = img["stem"]
+                    if len(img_stem) < 10:
+                        continue
+                    if (vid_stem.startswith(img_stem) or img_stem.startswith(vid_stem)):
+                        match_len = min(len(vid_stem), len(img_stem))
+                        if match_len > best_len:
+                            json_id = img["json_id"]
+                            best_len = match_len
+
+            if json_id:
+                cursor.execute("""
+                    UPDATE media_files SET json_metadata_id = ?
+                    WHERE id = ? AND json_metadata_id IS NULL
+                """, (json_id, vid["id"]))
+                if cursor.rowcount > 0:
+                    pass3_matched += 1
+
+        conn.commit()
+        matched += pass3_matched
+        print(f"  ✅ Pass 3 จับคู่วิดีโอ Live Photo: {pass3_matched:,} ไฟล์")
+
     # รายงานสถิติ
     cursor.execute("SELECT COUNT(*) FROM media_files WHERE json_metadata_id IS NOT NULL")
     total_matched = cursor.fetchone()[0]
