@@ -202,17 +202,23 @@ def match_metadata_to_media(conn: sqlite3.Connection):
     กลยุทธ์การจับคู่ (เรียงตามลำดับความแม่นยำ):
     1. title ตรงกับ filename ทุกประการ (exact match)
     2. title ตรงกับ filename แบบ case-insensitive
-    3. title ที่ถูกตัดชื่อ (Google Takeout บางทีตัดชื่อไฟล์ยาวให้สั้นลง)
+    3. ชื่อไฟล์ถูกตัด (truncated) - Google Takeout ตัดชื่อยาวให้สั้นลง
+       เช่น title = "474755...63c7334d.22050706.jpg"
+            ไฟล์จริง = "474755...63c.jpg" (ถูกตัดให้สั้น)
+       → เอา stem ของไฟล์ media ไปเช็คว่า title ขึ้นต้นด้วย stem นั้น
+    4. ย้อนกลับ - เอา stem ของ title ไปเช็คว่าตรงกับ stem ของไฟล์ media (prefix match)
     """
     print("\n🔗 Phase 1c: จับคู่ JSON metadata กับไฟล์ media...")
 
     cursor = conn.cursor()
 
-    # ดึง JSON metadata ทั้งหมดที่ยังไม่ได้จับคู่
+    # === Pass 1: จับคู่จากฝั่ง JSON → Media (exact + case-insensitive) ===
     cursor.execute("SELECT id, title, year_folder FROM json_metadata")
     json_rows = cursor.fetchall()
 
     matched = 0
+    unmatched_json = []
+
     for row in json_rows:
         json_id = row["id"]
         title = row["title"]
@@ -228,7 +234,7 @@ def match_metadata_to_media(conn: sqlite3.Connection):
             matched += cursor.rowcount
             continue
 
-        # กลยุทธ์ 2: exact match ไม่สนปี (กรณีไฟล์อยู่คนละโฟลเดอร์)
+        # กลยุทธ์ 2: exact match ไม่สนปี
         cursor.execute("""
             UPDATE media_files SET json_metadata_id = ?
             WHERE filename = ? AND json_metadata_id IS NULL
@@ -248,21 +254,88 @@ def match_metadata_to_media(conn: sqlite3.Connection):
             matched += cursor.rowcount
             continue
 
-        # กลยุทธ์ 4: ชื่อไฟล์ถูกตัด - ใช้ LIKE match
-        # Google Takeout บางทีตัดชื่อไฟล์ยาว เช่น "very_long_name" -> "very_long_na"
-        if len(title) > 10:
-            title_prefix = title[:len(title) - 5]  # ตัด 5 ตัวท้าย
-            _, ext = os.path.splitext(title)
-            cursor.execute("""
-                UPDATE media_files SET json_metadata_id = ?
-                WHERE filename LIKE ? AND extension = LOWER(?)
-                AND json_metadata_id IS NULL
-            """, (json_id, f"{title_prefix}%", ext))
-
-            if cursor.rowcount > 0:
-                matched += cursor.rowcount
+        # เก็บไว้ทำ Pass 2
+        unmatched_json.append(row)
 
     conn.commit()
+
+    # === Pass 2: จับคู่ไฟล์ที่ชื่อถูกตัด (truncated filename matching) ===
+    # Google Takeout ตัดชื่อไฟล์ยาวให้สั้นลงทั้งฝั่ง media และ JSON
+    # เช่น title = "474755...63c7334d.22050706.jpg"
+    #      ไฟล์จริง = "474755...63c.jpg"
+    # วิธี: เอา stem ของ media file ไปเช็คว่า title (ไม่รวม ext) ขึ้นต้นด้วย stem นั้น
+
+    if unmatched_json:
+        print(f"  🔄 Pass 2: จับคู่ไฟล์ชื่อถูกตัด ({len(unmatched_json):,} JSON ที่เหลือ)...")
+
+        # ดึงไฟล์ media ที่ยังไม่ได้จับคู่
+        cursor.execute("""
+            SELECT id, stem, extension, year_folder, filename
+            FROM media_files
+            WHERE json_metadata_id IS NULL
+        """)
+        unmatched_media = cursor.fetchall()
+
+        # สร้าง lookup: (year, extension) -> [(media_id, stem, filename)]
+        from collections import defaultdict
+        media_lookup = defaultdict(list)
+        for m in unmatched_media:
+            key = (m["year_folder"], m["extension"])
+            media_lookup[key].append({
+                "id": m["id"],
+                "stem": m["stem"],
+                "filename": m["filename"],
+            })
+
+        pass2_matched = 0
+        for row in unmatched_json:
+            json_id = row["id"]
+            title = row["title"]
+            year = row["year_folder"]
+
+            title_stem, title_ext_raw = os.path.splitext(title)
+            title_ext = title_ext_raw.lower()
+
+            # หาไฟล์ media ที่ stem เป็น prefix ของ title_stem
+            # (ไฟล์จริงถูกตัดให้สั้นกว่า title)
+            candidates = media_lookup.get((year, title_ext), [])
+            best_match = None
+            best_len = 0
+
+            for m in candidates:
+                media_stem = m["stem"]
+                # เช็คว่า title_stem ขึ้นต้นด้วย media_stem
+                # และ media_stem ต้องยาวพอสมควร (ป้องกัน false positive)
+                if (len(media_stem) >= 10
+                        and title_stem.startswith(media_stem)
+                        and len(media_stem) > best_len):
+                    best_match = m
+                    best_len = len(media_stem)
+
+            if best_match is None:
+                # ลองกลับด้าน: เอา title_stem เป็น prefix ของ media_stem
+                # (กรณี title ถูกตัดสั้นกว่าชื่อไฟล์จริง)
+                for m in candidates:
+                    media_stem = m["stem"]
+                    if (len(title_stem) >= 10
+                            and media_stem.startswith(title_stem)
+                            and len(title_stem) > best_len):
+                        best_match = m
+                        best_len = len(title_stem)
+
+            if best_match:
+                cursor.execute("""
+                    UPDATE media_files SET json_metadata_id = ?
+                    WHERE id = ? AND json_metadata_id IS NULL
+                """, (json_id, best_match["id"]))
+                if cursor.rowcount > 0:
+                    pass2_matched += 1
+                    # ลบออกจาก lookup เพื่อไม่ให้จับคู่ซ้ำ
+                    candidates.remove(best_match)
+
+        conn.commit()
+        matched += pass2_matched
+        print(f"  ✅ Pass 2 จับคู่เพิ่ม: {pass2_matched:,} ไฟล์")
 
     # รายงานสถิติ
     cursor.execute("SELECT COUNT(*) FROM media_files WHERE json_metadata_id IS NOT NULL")
@@ -289,10 +362,12 @@ def match_metadata_to_media(conn: sqlite3.Connection):
 def detect_live_photos(conn: sqlite3.Connection):
     """ตรวจหาคู่ Live Photo (ภาพ + วิดีโอ ชื่อ stem เดียวกัน)
 
-    เงื่อนไข:
-    - ไฟล์ภาพ (HEIC/JPG) + ไฟล์วิดีโอ (MP4/MOV) ที่มี stem เดียวกัน
-    - อยู่ในปีเดียวกัน
-    - ตรงกับ JSON ที่เป็น supplemental-metadata
+    กลยุทธ์ 3 ระดับ:
+    Pass 1: stem ตรงกันทุกประการ (เช่น IMG_2465.HEIC + IMG_2465.mp4)
+    Pass 2: stem ถูกตัด - ตัวหนึ่งเป็น prefix ของอีกตัว
+            (เช่น 474755...63c.jpg + 474755...63.mp4)
+    Pass 3: ใช้ JSON title เป็นตัวกลาง - ภาพกับวิดีโอที่มี original stem เดียวกัน
+            แต่ถูก Takeout ตัดให้สั้นลงคนละแบบ
     """
     print("\n📸 Phase 1d: ตรวจหาคู่ Live Photo...")
 
@@ -301,7 +376,24 @@ def detect_live_photos(conn: sqlite3.Connection):
     # ล้างข้อมูลเก่า
     cursor.execute("DELETE FROM live_photos")
 
-    # หาภาพที่มีวิดีโอคู่กัน (stem เดียวกัน, ปีเดียวกัน)
+    paired_image_ids = set()
+    paired_video_ids = set()
+    count = 0
+
+    def insert_pair(image_id, video_id):
+        nonlocal count
+        if image_id in paired_image_ids or video_id in paired_video_ids:
+            return
+        cursor.execute("""
+            INSERT OR IGNORE INTO live_photos (image_media_id, video_media_id)
+            VALUES (?, ?)
+        """, (image_id, video_id))
+        if cursor.rowcount > 0:
+            paired_image_ids.add(image_id)
+            paired_video_ids.add(video_id)
+            count += 1
+
+    # === Pass 1: exact stem match ===
     cursor.execute("""
         SELECT img.id AS image_id, vid.id AS video_id,
                img.filename AS img_name, vid.filename AS vid_name
@@ -313,19 +405,109 @@ def detect_live_photos(conn: sqlite3.Connection):
             AND (img.year_folder = vid.year_folder
                  OR (img.year_folder IS NULL AND vid.year_folder IS NULL))
     """)
+    pass1_pairs = cursor.fetchall()
+    for pair in pass1_pairs:
+        insert_pair(pair["image_id"], pair["video_id"])
+    pass1_count = count
+    print(f"  Pass 1 (exact stem): {pass1_count:,} คู่")
 
-    pairs = cursor.fetchall()
-    count = 0
+    # === Pass 2: prefix stem match (ชื่อถูกตัด) ===
+    # ดึงภาพและวิดีโอที่ยังไม่ได้จับคู่
+    cursor.execute("""
+        SELECT id, stem, year_folder FROM media_files
+        WHERE is_image = 1
+    """)
+    all_images = cursor.fetchall()
 
-    for pair in pairs:
-        cursor.execute("""
-            INSERT OR IGNORE INTO live_photos (image_media_id, video_media_id)
-            VALUES (?, ?)
-        """, (pair["image_id"], pair["video_id"]))
-        count += cursor.rowcount
+    cursor.execute("""
+        SELECT id, stem, year_folder FROM media_files
+        WHERE is_video = 1
+    """)
+    all_videos = cursor.fetchall()
+
+    # จัดกลุ่มวิดีโอตามปี
+    from collections import defaultdict
+    videos_by_year = defaultdict(list)
+    for v in all_videos:
+        if v["id"] not in paired_video_ids:
+            videos_by_year[v["year_folder"]].append(v)
+
+    for img in all_images:
+        if img["id"] in paired_image_ids:
+            continue
+
+        img_stem = img["stem"]
+        year = img["year_folder"]
+
+        # ต้องยาวพอ ป้องกัน false positive
+        if len(img_stem) < 10:
+            continue
+
+        best_match = None
+        best_len = 0
+
+        for vid in videos_by_year.get(year, []):
+            if vid["id"] in paired_video_ids:
+                continue
+            vid_stem = vid["stem"]
+            if len(vid_stem) < 10:
+                continue
+
+            # เช็คว่าตัวหนึ่งเป็น prefix ของอีกตัว
+            if img_stem.startswith(vid_stem) or vid_stem.startswith(img_stem):
+                match_len = min(len(img_stem), len(vid_stem))
+                if match_len > best_len:
+                    best_match = vid
+                    best_len = match_len
+
+        if best_match:
+            insert_pair(img["id"], best_match["id"])
+
+    pass2_count = count - pass1_count
+    if pass2_count > 0:
+        print(f"  Pass 2 (prefix stem): {pass2_count:,} คู่")
+
+    # === Pass 3: ใช้ JSON title เป็นตัวกลาง ===
+    # ภาพกับวิดีโอที่จับคู่กับ JSON คนละตัว แต่ original title มี stem เดียวกัน
+    # เช่น JSON title "IMG_2465.HEIC" → ภาพ IMG_2465.HEIC
+    #      JSON title "IMG_2465.HEIC" (supplemental) → วิดีโอ IMG_2465.mp4
+    # ใช้ original stem จาก title แทน stem ของไฟล์จริง
+    cursor.execute("""
+        SELECT m.id AS media_id, m.is_image, m.is_video, m.year_folder,
+               j.title AS json_title
+        FROM media_files m
+        JOIN json_metadata j ON m.json_metadata_id = j.id
+        WHERE m.json_metadata_id IS NOT NULL
+    """)
+    media_with_json = cursor.fetchall()
+
+    # สร้าง lookup: original_stem (จาก title) → {images: [], videos: []}
+    title_stem_groups = defaultdict(lambda: {"images": [], "videos": []})
+    for row in media_with_json:
+        if row["media_id"] in paired_image_ids or row["media_id"] in paired_video_ids:
+            continue
+
+        title = row["json_title"]
+        # ดึง stem จาก title (ชื่อเต็มก่อนถูกตัด)
+        original_stem = os.path.splitext(title)[0]
+
+        key = (original_stem, row["year_folder"])
+        if row["is_image"]:
+            title_stem_groups[key]["images"].append(row["media_id"])
+        elif row["is_video"]:
+            title_stem_groups[key]["videos"].append(row["media_id"])
+
+    for key, group in title_stem_groups.items():
+        for img_id in group["images"]:
+            for vid_id in group["videos"]:
+                insert_pair(img_id, vid_id)
+
+    pass3_count = count - pass1_count - pass2_count
+    if pass3_count > 0:
+        print(f"  Pass 3 (JSON title): {pass3_count:,} คู่")
 
     conn.commit()
-    print(f"  ✅ พบ Live Photo: {count:,} คู่")
+    print(f"  ✅ พบ Live Photo รวม: {count:,} คู่")
 
 
 def run_phase1(root_dir: str, db_path: str = "google_photos.db"):
