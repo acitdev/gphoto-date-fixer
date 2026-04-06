@@ -408,6 +408,133 @@ def match_metadata_to_media(conn: sqlite3.Connection):
         matched += pass3_matched
         print(f"  ✅ Pass 3 จับคู่วิดีโอ Live Photo: {pass3_matched:,} ไฟล์")
 
+    # === Pass 4: (N) duplicates และ -แก้ไข (edited files) ===
+    # Pattern 4a: (N) duplicates
+    #   JSON: IMG_3557.JPG.supplemental-metadata(1).json → title: IMG_3557.JPG
+    #   Media: IMG_3557(1).JPG  (วงเล็บอยู่ในชื่อไฟล์ ไม่ใช่ก่อน ext)
+    #   กติกา: ถ้า JSON มี (N) ไฟล์ media ที่จับคู่ก็ต้องมี (N) ตัวเดียวกัน
+    #
+    # Pattern 4b: -แก้ไข (edited version - Google Photos เพิ่มคำนี้เมื่อแก้ไขภาพ)
+    #   Media: IMG_3557-แก้ไข.JPG → ใช้ JSON เดียวกับ IMG_3557.JPG
+    #   Media: IMG_3557-แก้ไข(1).JPG → ใช้ JSON เดียวกับ IMG_3557(1).JPG
+    #   รองรับ: -แก้ไข, -edited, -EDIT (case-insensitive)
+
+    print("  🔄 Pass 4: จับคู่ไฟล์ (N) duplicates และ -แก้ไข (edited)...")
+
+    import re as _re
+
+    # regex จับ (N) ที่ต่อท้าย stem เช่น "IMG_3557(1)" → base="IMG_3557", num="1"
+    dup_pattern = _re.compile(r"^(.*)\((\d+)\)$")
+
+    # regex จับ edit suffix เช่น "-แก้ไข", "-edited", "-EDIT"
+    # รองรับทั้งก่อนและหลัง (N)
+    edit_suffixes = ["-แก้ไข", "-edited", "-edit", "-EDIT", "-Edited"]
+
+    def strip_edit_suffix(stem: str) -> Optional[str]:
+        """ตัด edit suffix ออก คืน stem ใหม่ หรือ None ถ้าไม่มี suffix"""
+        # รองรับทั้ง "IMG-แก้ไข" และ "IMG-แก้ไข(1)"
+        base = stem
+        dup_suffix = ""
+        m = dup_pattern.match(stem)
+        if m:
+            base = m.group(1)
+            dup_suffix = f"({m.group(2)})"
+
+        for suf in edit_suffixes:
+            if base.endswith(suf):
+                cleaned_base = base[: -len(suf)]
+                return cleaned_base + dup_suffix
+        return None
+
+    def extract_dup_number(path: str) -> Optional[str]:
+        """ดึงเลข (N) จาก JSON filepath เช่น '....supplemental-metadata(1).json' → '1'"""
+        m = _re.search(r"\((\d+)\)\.json$", path)
+        if m:
+            return m.group(1)
+        return None
+
+    # ดึงไฟล์ media ที่ยังไม่ได้จับคู่
+    cursor.execute("""
+        SELECT id, filename, stem, extension, year_folder
+        FROM media_files
+        WHERE json_metadata_id IS NULL
+    """)
+    orphan_media = cursor.fetchall()
+
+    pass4_matched = 0
+
+    # สร้าง lookup ของ JSON ทั้งหมด พร้อมเลข (N) ที่ดึงจาก filepath
+    cursor.execute("""
+        SELECT id, title, year_folder, json_filepath
+        FROM json_metadata
+    """)
+    all_json = cursor.fetchall()
+
+    # lookup: (year, title_lower, dup_num) → json_id
+    json_lookup = {}
+    for j in all_json:
+        dup_num = extract_dup_number(j["json_filepath"]) or ""
+        key = (j["year_folder"], j["title"].lower(), dup_num)
+        json_lookup[key] = j["id"]
+        # เผื่อกรณีไม่สนปี
+        key_noyear = (None, j["title"].lower(), dup_num)
+        if key_noyear not in json_lookup:
+            json_lookup[key_noyear] = j["id"]
+
+    for m in orphan_media:
+        media_id = m["id"]
+        filename = m["filename"]
+        stem = m["stem"]
+        ext = m["extension"]
+        year = m["year_folder"]
+
+        json_id = None
+
+        # === 4a: ลองจับคู่ (N) duplicate ===
+        # เช่น "IMG_3557(1).JPG" → base_stem="IMG_3557", dup_num="1"
+        # ต้องหา JSON ที่ title="IMG_3557.JPG" + filepath มี "(1).json"
+        dup_match = dup_pattern.match(stem)
+        if dup_match:
+            base_stem = dup_match.group(1)
+            dup_num = dup_match.group(2)
+            expected_title = (base_stem + ext).lower()
+
+            json_id = json_lookup.get((year, expected_title, dup_num))
+            if json_id is None:
+                json_id = json_lookup.get((None, expected_title, dup_num))
+
+        # === 4b: ลอง strip edit suffix ===
+        # เช่น "IMG_3557-แก้ไข" → "IMG_3557" → หา JSON "IMG_3557.JPG"
+        # หรือ "IMG_3557-แก้ไข(1)" → "IMG_3557(1)" → หา JSON "IMG_3557.JPG" + dup="1"
+        if json_id is None:
+            cleaned_stem = strip_edit_suffix(stem)
+            if cleaned_stem:
+                # ลองเป็น (N) ก่อน
+                dup_match2 = dup_pattern.match(cleaned_stem)
+                if dup_match2:
+                    base_stem = dup_match2.group(1)
+                    dup_num = dup_match2.group(2)
+                    expected_title = (base_stem + ext).lower()
+                    json_id = (json_lookup.get((year, expected_title, dup_num))
+                               or json_lookup.get((None, expected_title, dup_num)))
+                else:
+                    # ไม่มี (N) - หา JSON ปกติ
+                    expected_title = (cleaned_stem + ext).lower()
+                    json_id = (json_lookup.get((year, expected_title, ""))
+                               or json_lookup.get((None, expected_title, "")))
+
+        if json_id:
+            cursor.execute("""
+                UPDATE media_files SET json_metadata_id = ?
+                WHERE id = ? AND json_metadata_id IS NULL
+            """, (json_id, media_id))
+            if cursor.rowcount > 0:
+                pass4_matched += 1
+
+    conn.commit()
+    matched += pass4_matched
+    print(f"  ✅ Pass 4 จับคู่ (N)/แก้ไข: {pass4_matched:,} ไฟล์")
+
     # รายงานสถิติ
     cursor.execute("SELECT COUNT(*) FROM media_files WHERE json_metadata_id IS NOT NULL")
     total_matched = cursor.fetchone()[0]
