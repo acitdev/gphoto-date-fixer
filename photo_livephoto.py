@@ -24,10 +24,24 @@ import os
 import shutil
 import subprocess
 import sqlite3
+import sys
 import uuid
 from typing import Optional
 
 from photo_db import get_connection, print_stats
+
+
+def progress(text: str):
+    """แสดง progress แบบเขียนทับบรรทัดเดิม"""
+    terminal_width = shutil.get_terminal_size((80, 20)).columns
+    sys.stdout.write(f"\r{text[:terminal_width]:<{terminal_width}}")
+    sys.stdout.flush()
+
+
+def progress_error(text: str):
+    """แสดง error แยกบรรทัดใหม่"""
+    sys.stdout.write(f"\n{text}\n")
+    sys.stdout.flush()
 
 
 def check_exiftool() -> bool:
@@ -115,20 +129,20 @@ def write_content_identifier(
     try:
         result = subprocess.run(img_cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            print(f"    ⚠️  ExifTool error (ภาพ): {result.stderr.strip()}")
+            progress_error(f"  ⚠️  ExifTool error (ภาพ): {result.stderr.strip()}")
             return False
     except Exception as e:
-        print(f"    ⚠️  Error (ภาพ): {e}")
+        progress_error(f"  ⚠️  Error (ภาพ): {e}")
         return False
 
     # เขียนลงไฟล์วิดีโอ
     try:
         result = subprocess.run(vid_cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            print(f"    ⚠️  ExifTool error (วิดีโอ): {result.stderr.strip()}")
+            progress_error(f"  ⚠️  ExifTool error (วิดีโอ): {result.stderr.strip()}")
             return False
     except Exception as e:
-        print(f"    ⚠️  Error (วิดีโอ): {e}")
+        progress_error(f"  ⚠️  Error (วิดีโอ): {e}")
         return False
 
     return True
@@ -195,36 +209,30 @@ def run_phase3(
 
         # ตรวจสอบว่าทั้งสองไฟล์ยังอยู่
         if not os.path.isfile(image_path):
-            print(f"  ⚠️  [{i}/{total}] ไม่พบไฟล์ภาพ: {image_path}")
+            progress_error(f"  ⚠️  [{i}/{total}] ไม่พบไฟล์ภาพ: {image_path}")
             failed += 1
             continue
         if not os.path.isfile(video_path):
-            print(f"  ⚠️  [{i}/{total}] ไม่พบไฟล์วิดีโอ: {video_path}")
+            progress_error(f"  ⚠️  [{i}/{total}] ไม่พบไฟล์วิดีโอ: {video_path}")
             failed += 1
             continue
 
-        print(f"  [{i}/{total}] {image_name} + {video_name}")
+        # แสดง progress (เขียนทับบรรทัดเดิม)
+        pct = i * 100 // total
+        progress(f"  [{i:,}/{total:,}] {pct}% {image_name} + {video_name}")
 
         # ตรวจสอบ ContentIdentifier ที่มีอยู่แล้ว
         existing_img_id = read_existing_content_id(image_path) if not dry_run else None
         existing_vid_id = read_existing_content_id(video_path) if not dry_run else None
 
         if existing_img_id and existing_vid_id and existing_img_id == existing_vid_id:
-            # ทั้งคู่มี ID เหมือนกันแล้ว ไม่ต้องทำอะไร
             content_id = existing_img_id
-            print(f"    ✅ มี ContentIdentifier อยู่แล้ว: {content_id}")
         elif existing_img_id:
-            # ใช้ ID จากภาพ (เพราะภาพเป็น primary)
             content_id = existing_img_id
-            print(f"    🔄 ใช้ ContentIdentifier จากภาพ: {content_id}")
         elif existing_vid_id:
-            # ใช้ ID จากวิดีโอ
             content_id = existing_vid_id
-            print(f"    🔄 ใช้ ContentIdentifier จากวิดีโอ: {content_id}")
         else:
-            # สร้าง UUID ใหม่
             content_id = str(uuid.uuid4()).upper()
-            print(f"    🆕 สร้าง ContentIdentifier ใหม่: {content_id}")
 
         ok = write_content_identifier(
             image_path, video_path, content_id, dry_run
@@ -245,6 +253,10 @@ def run_phase3(
             failed += 1
 
     conn.commit()
+
+    # จบ progress line
+    progress(f"  [{total:,}/{total:,}] 100% เสร็จสิ้น")
+    print()
 
     print(f"\n✅ สำเร็จ: {success:,} คู่")
     if failed > 0:

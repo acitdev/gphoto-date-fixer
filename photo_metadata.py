@@ -20,10 +20,25 @@ import os
 import shutil
 import subprocess
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from typing import Optional
 
 from photo_db import get_connection, print_stats
+
+
+def progress(text: str):
+    """แสดง progress แบบเขียนทับบรรทัดเดิม"""
+    # ล้างบรรทัดเดิมด้วย space แล้วกลับต้นบรรทัด
+    terminal_width = shutil.get_terminal_size((80, 20)).columns
+    sys.stdout.write(f"\r{text[:terminal_width]:<{terminal_width}}")
+    sys.stdout.flush()
+
+
+def progress_error(text: str):
+    """แสดง error แยกบรรทัดใหม่ (ไม่ถูกเขียนทับ)"""
+    sys.stdout.write(f"\n{text}\n")
+    sys.stdout.flush()
 
 
 def check_exiftool() -> bool:
@@ -165,7 +180,7 @@ def write_metadata_for_file(
     )
 
     if dry_run:
-        print(f"  [DRY RUN] {' '.join(cmd)}")
+        progress_error(f"  [DRY RUN] {' '.join(cmd)}")
         return True
 
     try:
@@ -177,8 +192,7 @@ def write_metadata_for_file(
         )
 
         if result.returncode != 0:
-            print(f"  ⚠️  ExifTool error: {filepath}")
-            print(f"      stderr: {result.stderr.strip()}")
+            progress_error(f"  ⚠️  ExifTool error: {filepath}\n      stderr: {result.stderr.strip()}")
             return False
 
         # อัปเดตวันที่ระดับ OS
@@ -186,10 +200,10 @@ def write_metadata_for_file(
         return True
 
     except subprocess.TimeoutExpired:
-        print(f"  ⚠️  ExifTool timeout: {filepath}")
+        progress_error(f"  ⚠️  ExifTool timeout: {filepath}")
         return False
     except Exception as e:
-        print(f"  ⚠️  Error: {filepath} ({e})")
+        progress_error(f"  ⚠️  Error: {filepath} ({e})")
         return False
 
 
@@ -244,7 +258,7 @@ def run_phase2(
         print("\n✅ ไม่มีไฟล์ที่ต้องเขียน metadata (ทำหมดแล้วหรือยังไม่ได้จับคู่)")
         return
 
-    print(f"\n📝 ต้องเขียน metadata: {total:,} ไฟล์")
+    print(f"\n📝 ต้องเขียน metadata: {total:,} ไฟล์\n")
 
     success = 0
     failed = 0
@@ -257,24 +271,25 @@ def run_phase2(
         # ใช้ photoTakenTime ก่อน ถ้าไม่มีใช้ creationTime
         timestamp = row["photo_taken_timestamp"] or row["creation_timestamp"]
         if timestamp is None:
-            print(f"  ⚠️  [{i}/{total}] ไม่มี timestamp: {filename}")
+            progress_error(f"  ⚠️  [{i}/{total}] ไม่มี timestamp: {filename}")
             failed += 1
             continue
 
         # ตรวจสอบว่าไฟล์ยังอยู่
         if not os.path.isfile(filepath):
-            print(f"  ⚠️  [{i}/{total}] ไม่พบไฟล์: {filepath}")
+            progress_error(f"  ⚠️  [{i}/{total}] ไม่พบไฟล์: {filepath}")
             failed += 1
             continue
 
-        # แสดง progress
+        # แสดง progress (เขียนทับบรรทัดเดิม)
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         date_display = dt.strftime("%Y-%m-%d %H:%M")
         gps_display = ""
         if row["latitude"] is not None:
-            gps_display = f" 📍({row['latitude']:.4f}, {row['longitude']:.4f})"
+            gps_display = f" GPS"
 
-        print(f"  [{i}/{total}] {filename} → {date_display}{gps_display}")
+        pct = i * 100 // total
+        progress(f"  [{i:,}/{total:,}] {pct}% {filename} → {date_display}{gps_display}")
 
         ok = write_metadata_for_file(
             filepath=filepath,
@@ -300,6 +315,10 @@ def run_phase2(
             failed += 1
 
     conn.commit()
+
+    # จบ progress line แล้วขึ้นบรรทัดใหม่
+    progress(f"  [{total:,}/{total:,}] 100% เสร็จสิ้น")
+    print()  # newline
 
     print(f"\n✅ สำเร็จ: {success:,} ไฟล์")
     if failed > 0:
