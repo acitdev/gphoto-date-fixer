@@ -535,6 +535,72 @@ def match_metadata_to_media(conn: sqlite3.Connection):
     matched += pass4_matched
     print(f"  ✅ Pass 4 จับคู่ (N)/แก้ไข: {pass4_matched:,} ไฟล์")
 
+    # === Pass 5: เก็บตกวิดีโอ Live Photo หลัง Pass 4 ===
+    # Pass 3 รันก่อน Pass 4 ทำให้วิดีโอ (N) ที่ภาพเพิ่ง match ใน Pass 4 ตกหล่น
+    # เช่น IMG_0216(1).JPG ถูก match ใน Pass 4 แต่ IMG_0216(1).MP4 ข้าม Pass 3 ไปแล้ว
+    # Pass 5 ทำ logic เดียวกับ Pass 3 อีกครั้งเพื่อเก็บตก
+
+    cursor.execute("""
+        SELECT id, stem, year_folder FROM media_files
+        WHERE is_video = 1 AND json_metadata_id IS NULL
+    """)
+    orphan_videos_pass5 = cursor.fetchall()
+
+    if orphan_videos_pass5:
+        print("  🔄 Pass 5: เก็บตกวิดีโอ Live Photo (หลัง Pass 4)...")
+
+        from collections import defaultdict as _defaultdict
+
+        # ดึงภาพที่มี JSON แล้ว (อัปเดตหลัง Pass 4)
+        cursor.execute("""
+            SELECT id, stem, year_folder, json_metadata_id FROM media_files
+            WHERE is_image = 1 AND json_metadata_id IS NOT NULL
+        """)
+        matched_imgs = cursor.fetchall()
+
+        exact_lk = {}
+        prefix_cands = _defaultdict(list)
+        for img in matched_imgs:
+            exact_lk[(img["year_folder"], img["stem"])] = img["json_metadata_id"]
+            prefix_cands[img["year_folder"]].append({
+                "stem": img["stem"],
+                "json_id": img["json_metadata_id"],
+            })
+
+        pass5_matched = 0
+        for vid in orphan_videos_pass5:
+            vid_stem = vid["stem"]
+            year = vid["year_folder"]
+            json_id = None
+
+            # exact stem
+            json_id = exact_lk.get((year, vid_stem))
+
+            # prefix match
+            if json_id is None and len(vid_stem) >= 10:
+                best_len = 0
+                for img in prefix_cands.get(year, []):
+                    img_stem = img["stem"]
+                    if len(img_stem) < 10:
+                        continue
+                    if (vid_stem.startswith(img_stem) or img_stem.startswith(vid_stem)):
+                        match_len = min(len(vid_stem), len(img_stem))
+                        if match_len > best_len:
+                            json_id = img["json_id"]
+                            best_len = match_len
+
+            if json_id:
+                cursor.execute("""
+                    UPDATE media_files SET json_metadata_id = ?
+                    WHERE id = ? AND json_metadata_id IS NULL
+                """, (json_id, vid["id"]))
+                if cursor.rowcount > 0:
+                    pass5_matched += 1
+
+        conn.commit()
+        matched += pass5_matched
+        print(f"  ✅ Pass 5 เก็บตกวิดีโอ: {pass5_matched:,} ไฟล์")
+
     # รายงานสถิติ
     cursor.execute("SELECT COUNT(*) FROM media_files WHERE json_metadata_id IS NOT NULL")
     total_matched = cursor.fetchone()[0]
