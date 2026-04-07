@@ -82,6 +82,7 @@ def build_exiftool_command(
         "exiftool",
         "-overwrite_original",  # ไม่สร้างไฟล์ _original สำรอง
         "-ignoreMinorErrors",
+        "-F",                   # ซ่อมโครงสร้าง metadata ที่เสียหาย
     ]
 
     if is_video:
@@ -179,6 +180,28 @@ _FORMAT_TO_EXT = {
 }
 
 
+def find_renamed_file(filepath: str) -> Optional[str]:
+    """หาไฟล์ที่อาจถูกเปลี่ยนนามสกุลไปแล้วจากรอบก่อน
+
+    เช่น DB บอกว่า IMG_3133.DNG แต่รอบก่อนเปลี่ยนเป็น IMG_3133.jpg ไปแล้ว
+    ให้ลองหาไฟล์ชื่อเดียวกันแต่นามสกุลอื่น
+
+    Returns:
+        path ที่พบ หรือ None
+    """
+    base = os.path.splitext(filepath)[0]
+    for ext in (".jpg", ".jpeg", ".png", ".heic", ".mp4", ".mov"):
+        candidate = base + ext
+        if os.path.isfile(candidate):
+            return candidate
+    # ลอง _renamed ด้วย
+    for ext in (".jpg", ".jpeg", ".png", ".heic", ".mp4", ".mov"):
+        candidate = base + "_renamed" + ext
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def rename_to_real_format(filepath: str, stderr: str) -> Optional[str]:
     """ถ้า ExifTool บอกว่านามสกุลไม่ตรงกับเนื้อไฟล์จริง ให้เปลี่ยนนามสกุล
 
@@ -249,9 +272,7 @@ def write_metadata_for_file(
             if "looks more like a" in result.stderr:
                 new_path = rename_to_real_format(filepath, result.stderr)
                 if new_path:
-                    progress(
-                        f"  [{i:,}/{total:,}] {pct}% {filename} → {os.path.basename(new_path)}"
-                    )
+                    # เปลี่ยนนามสกุลเงียบ ๆ ไม่ต้องพ่น error
                     # สร้างคำสั่งใหม่ด้วย path ใหม่
                     cmd2 = build_exiftool_command(
                         new_path, timestamp, latitude, longitude, altitude, is_video
@@ -356,11 +377,23 @@ def run_phase2(
             failed += 1
             continue
 
-        # ตรวจสอบว่าไฟล์ยังอยู่
+        # ตรวจสอบว่าไฟล์ยังอยู่ (อาจถูกเปลี่ยนนามสกุลจากรอบก่อน)
         if not os.path.isfile(filepath):
-            progress_error(f"  [!]  [{i}/{total}] ไม่พบไฟล์: {filepath}")
-            failed += 1
-            continue
+            found = find_renamed_file(filepath)
+            if found:
+                # อัปเดต DB ให้ตรงกับชื่อไฟล์ปัจจุบัน
+                filepath = found
+                filename = os.path.basename(found)
+                new_stem, new_ext = os.path.splitext(filename)
+                cursor.execute("""
+                    UPDATE media_files
+                    SET filepath = ?, filename = ?, stem = ?, extension = ?
+                    WHERE id = ?
+                """, (filepath, filename, new_stem, new_ext.lower(), row["id"]))
+            else:
+                progress_error(f"  [!]  [{i}/{total}] ไม่พบไฟล์: {filepath}")
+                failed += 1
+                continue
 
         # แสดง progress (เขียนทับบรรทัดเดิม)
         dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
