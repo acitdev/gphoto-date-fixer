@@ -197,16 +197,12 @@ def scan_media_files(conn: sqlite3.Connection, root_dir: str):
 
 
 def match_metadata_to_media(conn: sqlite3.Connection):
-    """จับคู่ JSON metadata กับไฟล์ media
+    """จับคู่ JSON metadata กับไฟล์ media (บังคับปีเดียวกันเสมอ)
 
     กลยุทธ์การจับคู่ (เรียงตามลำดับความแม่นยำ):
-    1. title ตรงกับ filename ทุกประการ (exact match)
-    2. title ตรงกับ filename แบบ case-insensitive
-    3. ชื่อไฟล์ถูกตัด (truncated) - Google Takeout ตัดชื่อยาวให้สั้นลง
-       เช่น title = "474755...63c7334d.22050706.jpg"
-            ไฟล์จริง = "474755...63c.jpg" (ถูกตัดให้สั้น)
-       → เอา stem ของไฟล์ media ไปเช็คว่า title ขึ้นต้นด้วย stem นั้น
-    4. ย้อนกลับ - เอา stem ของ title ไปเช็คว่าตรงกับ stem ของไฟล์ media (prefix match)
+    1. title ตรงกับ filename ทุกประการ + ปีเดียวกัน (exact match)
+    2. stem match + ปีเดียวกัน (ชื่อเดียวกันแต่ ext ต่างกัน เช่น HEIC→jpg)
+    3. case-insensitive match + ปีเดียวกัน
     """
     print("\n[/] Phase 1c: จับคู่ JSON metadata กับไฟล์ media...")
 
@@ -234,37 +230,31 @@ def match_metadata_to_media(conn: sqlite3.Connection):
             matched += cursor.rowcount
             continue
 
-        # กลยุทธ์ 2: exact match ไม่สนปี
-        cursor.execute("""
-            UPDATE media_files SET json_metadata_id = ?
-            WHERE filename = ? AND json_metadata_id IS NULL
-        """, (json_id, title))
-
-        if cursor.rowcount > 0:
-            matched += cursor.rowcount
-            continue
-
-        # กลยุทธ์ 3: case-insensitive match
-        cursor.execute("""
-            UPDATE media_files SET json_metadata_id = ?
-            WHERE LOWER(filename) = LOWER(?) AND json_metadata_id IS NULL
-        """, (json_id, title))
-
-        if cursor.rowcount > 0:
-            matched += cursor.rowcount
-            continue
-
-        # กลยุทธ์ 4: stem match (ชื่อเดียวกันแต่นามสกุลต่างกัน)
-        # สำหรับไฟล์ที่ถูกเปลี่ยนนามสกุลไปแล้ว เช่น IMG_0954.PNG → IMG_0954.jpg
+        # กลยุทธ์ 2: stem match + ปีเดียวกัน (ชื่อเดียวกันแต่นามสกุลต่างกัน)
+        # สำหรับไฟล์ที่ถูกเปลี่ยนนามสกุลไปแล้ว เช่น IMG_0954.HEIC → IMG_0954.jpg
+        # ต้องจับคู่ในปีเดียวกันก่อน เพื่อไม่ให้ไปแย่งไฟล์จากปีอื่น
+        # เรียง is_video ASC เพื่อให้ภาพได้ก่อนวิดีโอ (วิดีโอจะจับคู่ใน Pass 3)
         title_stem = os.path.splitext(title)[0]
         cursor.execute("""
-            UPDATE media_files SET json_metadata_id = ?
-            WHERE id = (
-                SELECT id FROM media_files
-                WHERE stem = ? AND year_folder = ? AND json_metadata_id IS NULL
-                LIMIT 1
+            SELECT id FROM media_files
+            WHERE stem = ? AND year_folder = ? AND json_metadata_id IS NULL
+            ORDER BY is_video ASC
+        """, (title_stem, year))
+        stem_match = cursor.fetchone()
+        if stem_match:
+            cursor.execute(
+                "UPDATE media_files SET json_metadata_id = ? WHERE id = ?",
+                (json_id, stem_match["id"])
             )
-        """, (json_id, title_stem, year))
+            matched += 1
+            continue
+
+        # กลยุทธ์ 3: case-insensitive match + ปีเดียวกัน
+        cursor.execute("""
+            UPDATE media_files SET json_metadata_id = ?
+            WHERE LOWER(filename) = LOWER(?) AND year_folder = ?
+                  AND json_metadata_id IS NULL
+        """, (json_id, title, year))
 
         if cursor.rowcount > 0:
             matched += cursor.rowcount
