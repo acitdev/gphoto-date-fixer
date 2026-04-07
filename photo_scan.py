@@ -62,7 +62,7 @@ def parse_json_metadata(json_path: str) -> Optional[dict]:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except (json.JSONDecodeError, UnicodeDecodeError, FileNotFoundError) as e:
-        print(f"  ⚠️  อ่าน JSON ไม่ได้: {json_path} ({e})")
+        print(f"  [!]  อ่าน JSON ไม่ได้: {json_path} ({e})")
         return None
 
     title = data.get("title", "")
@@ -116,7 +116,7 @@ def parse_json_metadata(json_path: str) -> Optional[dict]:
 
 def scan_json_files(conn: sqlite3.Connection, root_dir: str):
     """สแกนไฟล์ JSON ทั้งหมดแล้วเก็บลง database"""
-    print("\n🔍 Phase 1a: สแกนไฟล์ JSON metadata...")
+    print("\n[/] Phase 1a: สแกนไฟล์ JSON metadata...")
 
     root = Path(root_dir)
     count = 0
@@ -149,15 +149,15 @@ def scan_json_files(conn: sqlite3.Connection, root_dir: str):
             ))
             count += 1
         except sqlite3.Error as e:
-            print(f"  ⚠️  DB error: {json_path} ({e})")
+            print(f"  [!]  DB error: {json_path} ({e})")
 
     conn.commit()
-    print(f"  ✅ เก็บ JSON metadata: {count:,} ไฟล์ (ข้าม {skipped:,})")
+    print(f"  [X] เก็บ JSON metadata: {count:,} ไฟล์ (ข้าม {skipped:,})")
 
 
 def scan_media_files(conn: sqlite3.Connection, root_dir: str):
     """สแกนไฟล์ภาพ/วิดีโอทั้งหมดแล้วเก็บลง database"""
-    print("\n🔍 Phase 1b: สแกนไฟล์ภาพ/วิดีโอ...")
+    print("\n[/] Phase 1b: สแกนไฟล์ภาพ/วิดีโอ...")
 
     root = Path(root_dir)
     count = 0
@@ -190,10 +190,10 @@ def scan_media_files(conn: sqlite3.Connection, root_dir: str):
             ))
             count += 1
         except sqlite3.Error as e:
-            print(f"  ⚠️  DB error: {entry} ({e})")
+            print(f"  [!]  DB error: {entry} ({e})")
 
     conn.commit()
-    print(f"  ✅ เก็บไฟล์ media: {count:,} ไฟล์")
+    print(f"  [X] เก็บไฟล์ media: {count:,} ไฟล์")
 
 
 def match_metadata_to_media(conn: sqlite3.Connection):
@@ -208,7 +208,7 @@ def match_metadata_to_media(conn: sqlite3.Connection):
        → เอา stem ของไฟล์ media ไปเช็คว่า title ขึ้นต้นด้วย stem นั้น
     4. ย้อนกลับ - เอา stem ของ title ไปเช็คว่าตรงกับ stem ของไฟล์ media (prefix match)
     """
-    print("\n🔗 Phase 1c: จับคู่ JSON metadata กับไฟล์ media...")
+    print("\n[/] Phase 1c: จับคู่ JSON metadata กับไฟล์ media...")
 
     cursor = conn.cursor()
 
@@ -266,7 +266,7 @@ def match_metadata_to_media(conn: sqlite3.Connection):
     # วิธี: เอา stem ของ media file ไปเช็คว่า title (ไม่รวม ext) ขึ้นต้นด้วย stem นั้น
 
     if unmatched_json:
-        print(f"  🔄 Pass 2: จับคู่ไฟล์ชื่อถูกตัด ({len(unmatched_json):,} JSON ที่เหลือ)...")
+        print(f"  [/] Pass 2: จับคู่ไฟล์ชื่อถูกตัด ({len(unmatched_json):,} JSON ที่เหลือ)...")
 
         # ดึงไฟล์ media ที่ยังไม่ได้จับคู่
         cursor.execute("""
@@ -335,7 +335,7 @@ def match_metadata_to_media(conn: sqlite3.Connection):
 
         conn.commit()
         matched += pass2_matched
-        print(f"  ✅ Pass 2 จับคู่เพิ่ม: {pass2_matched:,} ไฟล์")
+        print(f"  [X] Pass 2 จับคู่เพิ่ม: {pass2_matched:,} ไฟล์")
 
     # === Pass 3: วิดีโอ Live Photo ใช้ JSON ร่วมกับภาพ ===
     # Google Takeout ไม่สร้าง JSON แยกสำหรับวิดีโอ Live Photo
@@ -345,7 +345,7 @@ def match_metadata_to_media(conn: sqlite3.Connection):
     #
     # กลยุทธ์: หาวิดีโอที่ยังไม่มี JSON แล้ว stem ตรงกับภาพที่มี JSON แล้ว
     # (รองรับทั้ง exact stem และ prefix match)
-    print("  🔄 Pass 3: จับคู่วิดีโอ Live Photo กับ JSON ของภาพ...")
+    print("  [/] Pass 3: จับคู่วิดีโอ Live Photo กับ JSON ของภาพ...")
 
     cursor.execute("""
         SELECT id, stem, year_folder FROM media_files
@@ -406,7 +406,7 @@ def match_metadata_to_media(conn: sqlite3.Connection):
 
         conn.commit()
         matched += pass3_matched
-        print(f"  ✅ Pass 3 จับคู่วิดีโอ Live Photo: {pass3_matched:,} ไฟล์")
+        print(f"  [X] Pass 3 จับคู่วิดีโอ Live Photo: {pass3_matched:,} ไฟล์")
 
     # === Pass 4: (N) duplicates และ -แก้ไข (edited files) ===
     # Pattern 4a: (N) duplicates
@@ -419,7 +419,7 @@ def match_metadata_to_media(conn: sqlite3.Connection):
     #   Media: IMG_3557-แก้ไข(1).JPG → ใช้ JSON เดียวกับ IMG_3557(1).JPG
     #   รองรับ: -แก้ไข, -edited, -EDIT (case-insensitive)
 
-    print("  🔄 Pass 4: จับคู่ไฟล์ (N) duplicates และ -แก้ไข (edited)...")
+    print("  [/] Pass 4: จับคู่ไฟล์ (N) duplicates และ -แก้ไข (edited)...")
 
     import re as _re
 
@@ -533,7 +533,7 @@ def match_metadata_to_media(conn: sqlite3.Connection):
 
     conn.commit()
     matched += pass4_matched
-    print(f"  ✅ Pass 4 จับคู่ (N)/แก้ไข: {pass4_matched:,} ไฟล์")
+    print(f"  [X] Pass 4 จับคู่ (N)/แก้ไข: {pass4_matched:,} ไฟล์")
 
     # === Pass 5: เก็บตกวิดีโอ Live Photo หลัง Pass 4 ===
     # Pass 3 รันก่อน Pass 4 ทำให้วิดีโอ (N) ที่ภาพเพิ่ง match ใน Pass 4 ตกหล่น
@@ -547,7 +547,7 @@ def match_metadata_to_media(conn: sqlite3.Connection):
     orphan_videos_pass5 = cursor.fetchall()
 
     if orphan_videos_pass5:
-        print("  🔄 Pass 5: เก็บตกวิดีโอ Live Photo (หลัง Pass 4)...")
+        print("  [/] Pass 5: เก็บตกวิดีโอ Live Photo (หลัง Pass 4)...")
 
         from collections import defaultdict as _defaultdict
 
@@ -599,7 +599,7 @@ def match_metadata_to_media(conn: sqlite3.Connection):
 
         conn.commit()
         matched += pass5_matched
-        print(f"  ✅ Pass 5 เก็บตกวิดีโอ: {pass5_matched:,} ไฟล์")
+        print(f"  [X] Pass 5 เก็บตกวิดีโอ: {pass5_matched:,} ไฟล์")
 
     # รายงานสถิติ
     cursor.execute("SELECT COUNT(*) FROM media_files WHERE json_metadata_id IS NOT NULL")
@@ -607,9 +607,9 @@ def match_metadata_to_media(conn: sqlite3.Connection):
     cursor.execute("SELECT COUNT(*) FROM media_files WHERE json_metadata_id IS NULL")
     total_unmatched = cursor.fetchone()[0]
 
-    print(f"  ✅ จับคู่สำเร็จ: {total_matched:,} ไฟล์")
+    print(f"  [X] จับคู่สำเร็จ: {total_matched:,} ไฟล์")
     if total_unmatched > 0:
-        print(f"  ⚠️  ยังไม่ได้จับคู่: {total_unmatched:,} ไฟล์")
+        print(f"  [!]  ยังไม่ได้จับคู่: {total_unmatched:,} ไฟล์")
 
         # แสดงตัวอย่างไฟล์ที่ไม่ได้จับคู่ (สูงสุด 10 ไฟล์)
         cursor.execute("""
@@ -618,7 +618,7 @@ def match_metadata_to_media(conn: sqlite3.Connection):
         """)
         unmatched = cursor.fetchall()
         if unmatched:
-            print("  📋 ตัวอย่างไฟล์ที่ยังไม่จับคู่:")
+            print("  [*] ตัวอย่างไฟล์ที่ยังไม่จับคู่:")
             for row in unmatched:
                 print(f"     - {row['filename']} (ปี: {row['year_folder']})")
 
@@ -633,7 +633,7 @@ def detect_live_photos(conn: sqlite3.Connection):
     Pass 3: ใช้ JSON title เป็นตัวกลาง - ภาพกับวิดีโอที่มี original stem เดียวกัน
             แต่ถูก Takeout ตัดให้สั้นลงคนละแบบ
     """
-    print("\n📸 Phase 1d: ตรวจหาคู่ Live Photo...")
+    print("\n[/] Phase 1d: ตรวจหาคู่ Live Photo...")
 
     cursor = conn.cursor()
 
@@ -771,19 +771,19 @@ def detect_live_photos(conn: sqlite3.Connection):
         print(f"  Pass 3 (JSON title): {pass3_count:,} คู่")
 
     conn.commit()
-    print(f"  ✅ พบ Live Photo รวม: {count:,} คู่")
+    print(f"  [X] พบ Live Photo รวม: {count:,} คู่")
 
 
 def run_phase1(root_dir: str, db_path: str = "google_photos.db"):
     """รัน Phase 1 ทั้งหมด"""
     print("=" * 50)
-    print("🚀 Phase 1: สแกน JSON + Media ลง SQLite")
+    print("[*] Phase 1: สแกน JSON + Media ลง SQLite")
     print(f"   Root directory: {root_dir}")
     print(f"   Database: {db_path}")
     print("=" * 50)
 
     if not os.path.isdir(root_dir):
-        print(f"❌ ไม่พบโฟลเดอร์: {root_dir}")
+        print(f"[!] ไม่พบโฟลเดอร์: {root_dir}")
         return
 
     conn = init_db(db_path)

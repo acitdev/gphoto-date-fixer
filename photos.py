@@ -82,7 +82,7 @@ def cmd_livephoto(args):
 
 def cmd_all(args):
     """รันทุก Phase ตามลำดับ"""
-    print("🏁 เริ่มทำงานทุก Phase ตามลำดับ\n")
+    print("[*] เริ่มทำงานทุก Phase ตามลำดับ\n")
 
     # Phase 1
     from photo_scan import run_phase1
@@ -96,13 +96,13 @@ def cmd_all(args):
     from photo_livephoto import run_phase3
     run_phase3(args.db, args.dry_run, args.year)
 
-    print("\n🎉 ทำงานครบทุก Phase แล้ว!")
+    print("\n[X] ทำงานครบทุก Phase แล้ว!")
 
 
 def cmd_stats(args):
     """แสดงสถิติ"""
     if not os.path.exists(args.db):
-        print(f"❌ ไม่พบ database: {args.db}")
+        print(f"[!] ไม่พบ database: {args.db}")
         print("   กรุณารัน phase 'scan' ก่อน")
         return
     conn = get_connection(args.db)
@@ -113,14 +113,14 @@ def cmd_stats(args):
 def cmd_query(args):
     """Query ข้อมูลในฐานข้อมูล"""
     if not os.path.exists(args.db):
-        print(f"❌ ไม่พบ database: {args.db}")
+        print(f"[!] ไม่พบ database: {args.db}")
         return
 
     conn = get_connection(args.db)
     cursor = conn.cursor()
 
     if args.unmatched:
-        print("\n📋 ไฟล์ media ที่ยังไม่ได้จับคู่กับ JSON:")
+        print("\n[*] ไฟล์ media ที่ยังไม่ได้จับคู่กับ JSON:")
         cursor.execute("""
             SELECT filename, year_folder, extension, file_size
             FROM media_files
@@ -134,7 +134,7 @@ def cmd_query(args):
         print(f"\n  รวม: {len(rows):,} ไฟล์")
 
     elif args.unmatched_json:
-        print("\n📋 JSON metadata ที่ไม่มีไฟล์ media จับคู่:")
+        print("\n[*] JSON metadata ที่ไม่มีไฟล์ media จับคู่:")
         cursor.execute("""
             SELECT j.title, j.year_folder
             FROM json_metadata j
@@ -148,7 +148,7 @@ def cmd_query(args):
         print(f"\n  รวม: {len(rows):,} ไฟล์")
 
     elif args.live_photos:
-        print("\n📸 คู่ Live Photo ที่พบ:")
+        print("\n[/] คู่ Live Photo ที่พบ:")
         cursor.execute("""
             SELECT img.filename AS img, vid.filename AS vid,
                    lp.content_identifier AS cid, lp.assembled,
@@ -160,14 +160,14 @@ def cmd_query(args):
         """)
         rows = cursor.fetchall()
         for row in rows:
-            status = "✅" if row["assembled"] else "⏳"
+            status = "[X]" if row["assembled"] else "[ ]"
             cid = row["cid"][:8] + "..." if row["cid"] else "—"
             print(f"  {status} {row['year_folder'] or '??'} | {row['img']} + {row['vid']} [{cid}]")
         print(f"\n  รวม: {len(rows):,} คู่")
 
     else:
         # แสดงภาพรวมตามปี
-        print("\n📊 สรุปตามปี:")
+        print("\n[*] สรุปตามปี:")
         cursor.execute("""
             SELECT year_folder,
                    COUNT(*) AS total,

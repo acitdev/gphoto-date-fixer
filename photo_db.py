@@ -131,7 +131,7 @@ def print_stats(conn: sqlite3.Connection):
     """แสดงสถิติรวมของ database"""
     stats = get_stats(conn)
     print("\n" + "=" * 50)
-    print("📊 สถิติ Database")
+    print("[*] สถิติ Database")
     print("=" * 50)
     print(f"  JSON metadata:      {stats['total_json']:,} ไฟล์")
     print(f"  Media files:        {stats['total_media']:,} ไฟล์")

@@ -44,7 +44,7 @@ def progress_error(text: str):
 def check_exiftool() -> bool:
     """ตรวจสอบว่าติดตั้ง ExifTool แล้วหรือยัง"""
     if shutil.which("exiftool") is None:
-        print("❌ ไม่พบ ExifTool!")
+        print("[!] ไม่พบ ExifTool!")
         print("   ติดตั้งด้วย: brew install exiftool")
         print("   หรือดาวน์โหลดจาก: https://exiftool.org/")
         return False
@@ -135,7 +135,7 @@ def update_file_dates(filepath: str, timestamp: int):
     try:
         os.utime(filepath, (timestamp, timestamp))
     except OSError as e:
-        print(f"  ⚠️  อัปเดตวันที่ OS ไม่ได้: {filepath} ({e})")
+        print(f"  [!]  อัปเดตวันที่ OS ไม่ได้: {filepath} ({e})")
         return
 
     # macOS: ตั้ง creation date ด้วย (modification date อย่างเดียวไม่พอ)
@@ -192,7 +192,7 @@ def write_metadata_for_file(
         )
 
         if result.returncode != 0:
-            progress_error(f"  ⚠️  ExifTool error: {filepath}\n      stderr: {result.stderr.strip()}")
+            progress_error(f"  [!]  ExifTool error: {filepath}\n      stderr: {result.stderr.strip()}")
             return False
 
         # อัปเดตวันที่ระดับ OS
@@ -200,10 +200,10 @@ def write_metadata_for_file(
         return True
 
     except subprocess.TimeoutExpired:
-        progress_error(f"  ⚠️  ExifTool timeout: {filepath}")
+        progress_error(f"  [!]  ExifTool timeout: {filepath}")
         return False
     except Exception as e:
-        progress_error(f"  ⚠️  Error: {filepath} ({e})")
+        progress_error(f"  [!]  Error: {filepath} ({e})")
         return False
 
 
@@ -215,12 +215,12 @@ def run_phase2(
 ):
     """รัน Phase 2: เขียน metadata กลับเข้าไฟล์ทั้งหมดที่จับคู่ได้"""
     print("=" * 50)
-    print("🚀 Phase 2: เขียน metadata กลับเข้าไฟล์")
+    print("[*] Phase 2: เขียน metadata กลับเข้าไฟล์")
     print(f"   Database: {db_path}")
     if dry_run:
-        print("   ⚡ DRY RUN MODE - ไม่แก้ไขไฟล์จริง")
+        print("   [*] DRY RUN MODE - ไม่แก้ไขไฟล์จริง")
     if year_filter:
-        print(f"   📅 กรองปี: {year_filter}")
+        print(f"   [*] กรองปี: {year_filter}")
     print("=" * 50)
 
     if not dry_run and not check_exiftool():
@@ -255,10 +255,10 @@ def run_phase2(
 
     total = len(rows)
     if total == 0:
-        print("\n✅ ไม่มีไฟล์ที่ต้องเขียน metadata (ทำหมดแล้วหรือยังไม่ได้จับคู่)")
+        print("\n[X] ไม่มีไฟล์ที่ต้องเขียน metadata (ทำหมดแล้วหรือยังไม่ได้จับคู่)")
         return
 
-    print(f"\n📝 ต้องเขียน metadata: {total:,} ไฟล์\n")
+    print(f"\n[/] ต้องเขียน metadata: {total:,} ไฟล์\n")
 
     success = 0
     failed = 0
@@ -271,13 +271,13 @@ def run_phase2(
         # ใช้ photoTakenTime ก่อน ถ้าไม่มีใช้ creationTime
         timestamp = row["photo_taken_timestamp"] or row["creation_timestamp"]
         if timestamp is None:
-            progress_error(f"  ⚠️  [{i}/{total}] ไม่มี timestamp: {filename}")
+            progress_error(f"  [!]  [{i}/{total}] ไม่มี timestamp: {filename}")
             failed += 1
             continue
 
         # ตรวจสอบว่าไฟล์ยังอยู่
         if not os.path.isfile(filepath):
-            progress_error(f"  ⚠️  [{i}/{total}] ไม่พบไฟล์: {filepath}")
+            progress_error(f"  [!]  [{i}/{total}] ไม่พบไฟล์: {filepath}")
             failed += 1
             continue
 
@@ -320,9 +320,9 @@ def run_phase2(
     progress(f"  [{total:,}/{total:,}] 100% เสร็จสิ้น")
     print()  # newline
 
-    print(f"\n✅ สำเร็จ: {success:,} ไฟล์")
+    print(f"\n[X] สำเร็จ: {success:,} ไฟล์")
     if failed > 0:
-        print(f"⚠️  ล้มเหลว: {failed:,} ไฟล์")
+        print(f"[!]  ล้มเหลว: {failed:,} ไฟล์")
 
     print_stats(conn)
     conn.close()

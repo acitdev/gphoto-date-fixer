@@ -47,7 +47,7 @@ def progress_error(text: str):
 def check_exiftool() -> bool:
     """ตรวจสอบว่าติดตั้ง ExifTool แล้วหรือยัง"""
     if shutil.which("exiftool") is None:
-        print("❌ ไม่พบ ExifTool!")
+        print("[!] ไม่พบ ExifTool!")
         print("   ติดตั้งด้วย: brew install exiftool")
         return False
     return True
@@ -129,20 +129,20 @@ def write_content_identifier(
     try:
         result = subprocess.run(img_cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            progress_error(f"  ⚠️  ExifTool error (ภาพ): {result.stderr.strip()}")
+            progress_error(f"  [!]  ExifTool error (ภาพ): {result.stderr.strip()}")
             return False
     except Exception as e:
-        progress_error(f"  ⚠️  Error (ภาพ): {e}")
+        progress_error(f"  [!]  Error (ภาพ): {e}")
         return False
 
     # เขียนลงไฟล์วิดีโอ
     try:
         result = subprocess.run(vid_cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            progress_error(f"  ⚠️  ExifTool error (วิดีโอ): {result.stderr.strip()}")
+            progress_error(f"  [!]  ExifTool error (วิดีโอ): {result.stderr.strip()}")
             return False
     except Exception as e:
-        progress_error(f"  ⚠️  Error (วิดีโอ): {e}")
+        progress_error(f"  [!]  Error (วิดีโอ): {e}")
         return False
 
     return True
@@ -155,12 +155,12 @@ def run_phase3(
 ):
     """รัน Phase 3: ประกอบ Live Photo ทั้งหมด"""
     print("=" * 50)
-    print("🚀 Phase 3: ประกอบ Live Photo")
+    print("[*] Phase 3: ประกอบ Live Photo")
     print(f"   Database: {db_path}")
     if dry_run:
-        print("   ⚡ DRY RUN MODE - ไม่แก้ไขไฟล์จริง")
+        print("   [*] DRY RUN MODE - ไม่แก้ไขไฟล์จริง")
     if year_filter:
-        print(f"   📅 กรองปี: {year_filter}")
+        print(f"   [*] กรองปี: {year_filter}")
     print("=" * 50)
 
     if not dry_run and not check_exiftool():
@@ -193,10 +193,10 @@ def run_phase3(
 
     total = len(rows)
     if total == 0:
-        print("\n✅ ไม่มีคู่ Live Photo ที่ต้องประกอบ")
+        print("\n[X] ไม่มีคู่ Live Photo ที่ต้องประกอบ")
         return
 
-    print(f"\n📸 ต้องประกอบ Live Photo: {total:,} คู่")
+    print(f"\n[/] ต้องประกอบ Live Photo: {total:,} คู่")
 
     success = 0
     failed = 0
@@ -209,11 +209,11 @@ def run_phase3(
 
         # ตรวจสอบว่าทั้งสองไฟล์ยังอยู่
         if not os.path.isfile(image_path):
-            progress_error(f"  ⚠️  [{i}/{total}] ไม่พบไฟล์ภาพ: {image_path}")
+            progress_error(f"  [!]  [{i}/{total}] ไม่พบไฟล์ภาพ: {image_path}")
             failed += 1
             continue
         if not os.path.isfile(video_path):
-            progress_error(f"  ⚠️  [{i}/{total}] ไม่พบไฟล์วิดีโอ: {video_path}")
+            progress_error(f"  [!]  [{i}/{total}] ไม่พบไฟล์วิดีโอ: {video_path}")
             failed += 1
             continue
 
@@ -258,11 +258,11 @@ def run_phase3(
     progress(f"  [{total:,}/{total:,}] 100% เสร็จสิ้น")
     print()
 
-    print(f"\n✅ สำเร็จ: {success:,} คู่")
+    print(f"\n[X] สำเร็จ: {success:,} คู่")
     if failed > 0:
-        print(f"⚠️  ล้มเหลว: {failed:,} คู่")
+        print(f"[!]  ล้มเหลว: {failed:,} คู่")
 
-    print("\n💡 ขั้นตอนต่อไป:")
+    print("\n[*] ขั้นตอนต่อไป:")
     print("   1. เปิด Apple Photos app")
     print("   2. ลากไฟล์ภาพ + วิดีโอ (ที่เป็นคู่กัน) เข้าไปพร้อมกัน")
     print("   3. Photos app จะรวมเป็น Live Photo อัตโนมัติ")
