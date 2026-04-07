@@ -254,6 +254,22 @@ def match_metadata_to_media(conn: sqlite3.Connection):
             matched += cursor.rowcount
             continue
 
+        # กลยุทธ์ 4: stem match (ชื่อเดียวกันแต่นามสกุลต่างกัน)
+        # สำหรับไฟล์ที่ถูกเปลี่ยนนามสกุลไปแล้ว เช่น IMG_0954.PNG → IMG_0954.jpg
+        title_stem = os.path.splitext(title)[0]
+        cursor.execute("""
+            UPDATE media_files SET json_metadata_id = ?
+            WHERE id = (
+                SELECT id FROM media_files
+                WHERE stem = ? AND year_folder = ? AND json_metadata_id IS NULL
+                LIMIT 1
+            )
+        """, (json_id, title_stem, year))
+
+        if cursor.rowcount > 0:
+            matched += cursor.rowcount
+            continue
+
         # เก็บไว้ทำ Pass 2
         unmatched_json.append(row)
 
