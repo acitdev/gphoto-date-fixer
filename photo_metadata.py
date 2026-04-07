@@ -235,6 +235,24 @@ def rename_to_real_format(filepath: str, stderr: str) -> Optional[str]:
         return None
 
 
+def repair_image(filepath: str) -> bool:
+    """ซ่อมไฟล์ภาพที่โครงสร้างภายในเสียหาย โดยเปิดแล้วเซฟใหม่ด้วย Pillow
+
+    Pillow อ่านเฉพาะ pixel data → เซฟใหม่เป็น JPEG สะอาด
+    ทำให้ ExifTool เขียน metadata ลงได้
+
+    Returns:
+        True ถ้าซ่อมสำเร็จ
+    """
+    try:
+        from PIL import Image
+        img = Image.open(filepath)
+        img.save(filepath, quality=95, subsampling=0)
+        return True
+    except Exception:
+        return False
+
+
 def write_metadata_for_file(
     filepath: str,
     timestamp: int,
@@ -289,6 +307,15 @@ def write_metadata_for_file(
                             f"      stderr: {result2.stderr.strip()}"
                         )
                         return False, new_path
+
+            # ลองซ่อมภาพแล้ว retry (เฉพาะไฟล์ภาพ ไม่ใช่วิดีโอ)
+            if not is_video and repair_image(filepath):
+                result3 = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=30
+                )
+                if result3.returncode == 0:
+                    update_file_dates(filepath, timestamp)
+                    return True, None
 
             progress_error(
                 f"  [!]  ExifTool error: {filepath}\n"
