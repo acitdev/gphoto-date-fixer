@@ -17,6 +17,7 @@ photo_metadata.py - Phase 2: เขียน metadata กลับเข้า�
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sqlite3
@@ -161,6 +162,56 @@ def update_file_dates(filepath: str, timestamp: int):
         pass  # ไม่ใช่ปัญหาร้ายแรงถ้า creation date ตั้งไม่ได้
 
 
+# regex จับ error "Not a valid X (looks more like a Y)"
+_LOOKS_LIKE_RE = re.compile(r"looks more like a (\w+)")
+
+# mapping ชื่อ format ที่ ExifTool บอก → นามสกุลไฟล์ที่ถูกต้อง
+_FORMAT_TO_EXT = {
+    "JPEG": ".jpg",
+    "PNG": ".png",
+    "HEIC": ".heic",
+    "TIFF": ".tiff",
+    "GIF": ".gif",
+    "BMP": ".bmp",
+    "WEBP": ".webp",
+    "MP4": ".mp4",
+    "MOV": ".mov",
+}
+
+
+def rename_to_real_format(filepath: str, stderr: str) -> Optional[str]:
+    """ถ้า ExifTool บอกว่านามสกุลไม่ตรงกับเนื้อไฟล์จริง ให้เปลี่ยนนามสกุล
+
+    เช่น IMG_0954.PNG ที่จริงเป็น JPEG → เปลี่ยนเป็น IMG_0954.jpg
+
+    Returns:
+        path ใหม่หลังเปลี่ยนชื่อ หรือ None ถ้าไม่ต้องเปลี่ยน
+    """
+    match = _LOOKS_LIKE_RE.search(stderr)
+    if not match:
+        return None
+
+    real_format = match.group(1).upper()
+    new_ext = _FORMAT_TO_EXT.get(real_format)
+    if not new_ext:
+        return None
+
+    base, old_ext = os.path.splitext(filepath)
+    if old_ext.lower() == new_ext:
+        return None  # นามสกุลตรงอยู่แล้ว
+
+    new_path = base + new_ext
+    # ถ้าไฟล์ปลายทางมีอยู่แล้ว ให้เพิ่ม _renamed
+    if os.path.exists(new_path):
+        new_path = base + "_renamed" + new_ext
+
+    try:
+        os.rename(filepath, new_path)
+        return new_path
+    except OSError:
+        return None
+
+
 def write_metadata_for_file(
     filepath: str,
     timestamp: int,
@@ -169,11 +220,13 @@ def write_metadata_for_file(
     altitude: Optional[float],
     is_video: bool,
     dry_run: bool = False,
-) -> bool:
+) -> tuple[bool, Optional[str]]:
     """เขียน metadata ลงในไฟล์เดียว
 
     Returns:
-        True ถ้าสำเร็จ, False ถ้าล้มเหลว
+        (success, new_filepath)
+        - success: True ถ้าสำเร็จ
+        - new_filepath: path ใหม่ถ้าไฟล์ถูกเปลี่ยนชื่อ (หรือ None)
     """
     cmd = build_exiftool_command(
         filepath, timestamp, latitude, longitude, altitude, is_video
@@ -181,7 +234,7 @@ def write_metadata_for_file(
 
     if dry_run:
         progress_error(f"  [DRY RUN] {' '.join(cmd)}")
-        return True
+        return True, None
 
     try:
         result = subprocess.run(
@@ -192,19 +245,46 @@ def write_metadata_for_file(
         )
 
         if result.returncode != 0:
-            progress_error(f"  [!]  ExifTool error: {filepath}\n      stderr: {result.stderr.strip()}")
-            return False
+            # ลอง retry ถ้า ExifTool บอกว่านามสกุลไม่ตรง
+            if "looks more like a" in result.stderr:
+                new_path = rename_to_real_format(filepath, result.stderr)
+                if new_path:
+                    progress(
+                        f"  [{i:,}/{total:,}] {pct}% {filename} → {os.path.basename(new_path)}"
+                    )
+                    # สร้างคำสั่งใหม่ด้วย path ใหม่
+                    cmd2 = build_exiftool_command(
+                        new_path, timestamp, latitude, longitude, altitude, is_video
+                    )
+                    result2 = subprocess.run(
+                        cmd2, capture_output=True, text=True, timeout=30
+                    )
+                    if result2.returncode == 0:
+                        update_file_dates(new_path, timestamp)
+                        return True, new_path
+                    else:
+                        progress_error(
+                            f"  [!]  ExifTool error (retry): {new_path}\n"
+                            f"      stderr: {result2.stderr.strip()}"
+                        )
+                        return False, new_path
+
+            progress_error(
+                f"  [!]  ExifTool error: {filepath}\n"
+                f"      stderr: {result.stderr.strip()}"
+            )
+            return False, None
 
         # อัปเดตวันที่ระดับ OS
         update_file_dates(filepath, timestamp)
-        return True
+        return True, None
 
     except subprocess.TimeoutExpired:
         progress_error(f"  [!]  ExifTool timeout: {filepath}")
-        return False
+        return False, None
     except Exception as e:
         progress_error(f"  [!]  Error: {filepath} ({e})")
-        return False
+        return False, None
 
 
 def run_phase2(
@@ -262,6 +342,7 @@ def run_phase2(
 
     success = 0
     failed = 0
+    renamed = 0
 
     for i, row in enumerate(rows, 1):
         filepath = row["filepath"]
@@ -291,7 +372,7 @@ def run_phase2(
         pct = i * 100 // total
         progress(f"  [{i:,}/{total:,}] {pct}% {filename} → {date_display}{gps_display}")
 
-        ok = write_metadata_for_file(
+        ok, new_path = write_metadata_for_file(
             filepath=filepath,
             timestamp=timestamp,
             latitude=row["latitude"],
@@ -304,10 +385,23 @@ def run_phase2(
         if ok:
             success += 1
             if not dry_run:
-                cursor.execute(
-                    "UPDATE media_files SET metadata_written = 1 WHERE id = ?",
-                    (row["id"],)
-                )
+                # ถ้าไฟล์ถูกเปลี่ยนชื่อ อัปเดต path ใน DB ด้วย
+                if new_path:
+                    renamed += 1
+                    new_filename = os.path.basename(new_path)
+                    new_stem, new_ext = os.path.splitext(new_filename)
+                    cursor.execute("""
+                        UPDATE media_files
+                        SET filepath = ?, filename = ?, stem = ?,
+                            extension = ?, metadata_written = 1
+                        WHERE id = ?
+                    """, (new_path, new_filename, new_stem,
+                          new_ext.lower(), row["id"]))
+                else:
+                    cursor.execute(
+                        "UPDATE media_files SET metadata_written = 1 WHERE id = ?",
+                        (row["id"],)
+                    )
                 # Commit ทุก 50 ไฟล์
                 if i % 50 == 0:
                     conn.commit()
@@ -321,6 +415,8 @@ def run_phase2(
     print()  # newline
 
     print(f"\n[X] สำเร็จ: {success:,} ไฟล์")
+    if renamed > 0:
+        print(f"[*] เปลี่ยนนามสกุลให้ตรงเนื้อไฟล์: {renamed:,} ไฟล์")
     if failed > 0:
         print(f"[!]  ล้มเหลว: {failed:,} ไฟล์")
 
