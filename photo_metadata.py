@@ -22,8 +22,9 @@ import shutil
 import subprocess
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from photo_db import get_connection, print_stats
 
@@ -59,6 +60,7 @@ def build_exiftool_command(
     longitude: Optional[float] = None,
     altitude: Optional[float] = None,
     is_video: bool = False,
+    tz: Optional[ZoneInfo] = None,
 ) -> list[str]:
     """สร้างคำสั่ง ExifTool สำหรับเขียน metadata
 
@@ -69,14 +71,18 @@ def build_exiftool_command(
         longitude: ลองจิจูด (หรือ None)
         altitude: ความสูง (หรือ None)
         is_video: เป็นไฟล์วิดีโอหรือไม่
+        tz: timezone สำหรับแปลงเวลา (None = UTC)
 
     Returns:
         list ของ arguments สำหรับ subprocess
     """
-    # แปลง timestamp เป็น format ที่ ExifTool เข้าใจ
-    dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    # แปลง timestamp เป็นเวลาท้องถิ่น (หรือ UTC ถ้าไม่ระบุ timezone)
+    target_tz = tz or timezone.utc
+    dt = datetime.fromtimestamp(timestamp, tz=target_tz)
     date_str = dt.strftime("%Y:%m:%d %H:%M:%S")
-    date_str_tz = dt.strftime("%Y:%m:%d %H:%M:%S+00:00")
+    offset_str = dt.strftime("%z")  # เช่น "+0700"
+    # แปลงเป็น format ที่ ExifTool เข้าใจ: +07:00
+    offset_fmt = f"{offset_str[:3]}:{offset_str[3:]}" if offset_str else "+00:00"
 
     cmd = [
         "exiftool",
@@ -99,7 +105,9 @@ def build_exiftool_command(
         # สำหรับภาพ (JPG/HEIC) ใช้ EXIF tags
         cmd.extend([
             f"-AllDates={date_str}",
-            f"-EXIF:OffsetTimeOriginal=+00:00",
+            f"-EXIF:OffsetTimeOriginal={offset_fmt}",
+            f"-EXIF:OffsetTime={offset_fmt}",
+            f"-EXIF:OffsetTimeDigitized={offset_fmt}",
         ])
 
     # GPS coordinates
@@ -126,13 +134,11 @@ def build_exiftool_command(
     return cmd
 
 
-def update_file_dates(filepath: str, timestamp: int):
-    """อัปเดตวันที่ระดับ OS (file modification time + access time)
+def update_file_dates(filepath: str, timestamp: int, tz: Optional[ZoneInfo] = None):
+    """อัปเดตวันที่ระดับ OS (file modification time + access time + creation date)
 
     ExifTool แก้ metadata ภายในไฟล์ แต่ไม่แก้วันที่ของไฟล์บน file system
     ต้องใช้ os.utime() ด้วย เพื่อให้ Finder/file manager แสดงวันที่ถูกต้อง
-
-    สำหรับ macOS: ใช้ SetFile หรือ touch เพื่อตั้ง creation date ด้วย
     """
     try:
         os.utime(filepath, (timestamp, timestamp))
@@ -140,10 +146,10 @@ def update_file_dates(filepath: str, timestamp: int):
         print(f"  [!]  อัปเดตวันที่ OS ไม่ได้: {filepath} ({e})")
         return
 
-    # macOS: ตั้ง creation date ด้วย (modification date อย่างเดียวไม่พอ)
-    # ใช้ SetFile (ถ้ามี) หรือ xattr
+    # macOS: ตั้ง creation date ด้วย SetFile
     try:
-        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        target_tz = tz or timezone.utc
+        dt = datetime.fromtimestamp(timestamp, tz=target_tz)
         # SetFile format: "MM/DD/YYYY HH:MM:SS"
         setfile_date = dt.strftime("%m/%d/%Y %H:%M:%S")
 
@@ -153,14 +159,13 @@ def update_file_dates(filepath: str, timestamp: int):
                 capture_output=True, timeout=10,
             )
         else:
-            # ใช้ touch -t เป็น fallback (แก้ได้แค่ mtime)
             touch_date = dt.strftime("%Y%m%d%H%M.%S")
             subprocess.run(
                 ["touch", "-t", touch_date, filepath],
                 capture_output=True, timeout=10,
             )
     except Exception:
-        pass  # ไม่ใช่ปัญหาร้ายแรงถ้า creation date ตั้งไม่ได้
+        pass
 
 
 # regex จับ error "Not a valid X (looks more like a Y)"
@@ -261,6 +266,7 @@ def write_metadata_for_file(
     altitude: Optional[float],
     is_video: bool,
     dry_run: bool = False,
+    tz: Optional[ZoneInfo] = None,
 ) -> tuple[bool, Optional[str]]:
     """เขียน metadata ลงในไฟล์เดียว
 
@@ -270,7 +276,7 @@ def write_metadata_for_file(
         - new_filepath: path ใหม่ถ้าไฟล์ถูกเปลี่ยนชื่อ (หรือ None)
     """
     cmd = build_exiftool_command(
-        filepath, timestamp, latitude, longitude, altitude, is_video
+        filepath, timestamp, latitude, longitude, altitude, is_video, tz
     )
 
     if dry_run:
@@ -293,13 +299,13 @@ def write_metadata_for_file(
                     # เปลี่ยนนามสกุลเงียบ ๆ ไม่ต้องพ่น error
                     # สร้างคำสั่งใหม่ด้วย path ใหม่
                     cmd2 = build_exiftool_command(
-                        new_path, timestamp, latitude, longitude, altitude, is_video
+                        new_path, timestamp, latitude, longitude, altitude, is_video, tz
                     )
                     result2 = subprocess.run(
                         cmd2, capture_output=True, text=True, timeout=30
                     )
                     if result2.returncode == 0:
-                        update_file_dates(new_path, timestamp)
+                        update_file_dates(new_path, timestamp, tz)
                         return True, new_path
                     else:
                         progress_error(
@@ -314,7 +320,7 @@ def write_metadata_for_file(
                     cmd, capture_output=True, text=True, timeout=30
                 )
                 if result3.returncode == 0:
-                    update_file_dates(filepath, timestamp)
+                    update_file_dates(filepath, timestamp, tz)
                     return True, None
 
             progress_error(
@@ -324,7 +330,7 @@ def write_metadata_for_file(
             return False, None
 
         # อัปเดตวันที่ระดับ OS
-        update_file_dates(filepath, timestamp)
+        update_file_dates(filepath, timestamp, tz)
         return True, None
 
     except subprocess.TimeoutExpired:
@@ -340,11 +346,13 @@ def run_phase2(
     dry_run: bool = False,
     year_filter: Optional[str] = None,
     limit: Optional[int] = None,
+    tz: Optional[ZoneInfo] = None,
 ):
     """รัน Phase 2: เขียน metadata กลับเข้าไฟล์ทั้งหมดที่จับคู่ได้"""
     print("=" * 50)
     print("[*] Phase 2: เขียน metadata กลับเข้าไฟล์")
     print(f"   Database: {db_path}")
+    print(f"   Timezone: {tz or 'UTC'}")
     if dry_run:
         print("   [*] DRY RUN MODE - ไม่แก้ไขไฟล์จริง")
     if year_filter:
@@ -423,7 +431,8 @@ def run_phase2(
                 continue
 
         # แสดง progress (เขียนทับบรรทัดเดิม)
-        dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        target_tz = tz or timezone.utc
+        dt = datetime.fromtimestamp(timestamp, tz=target_tz)
         date_display = dt.strftime("%Y-%m-%d %H:%M")
         gps_display = ""
         if row["latitude"] is not None:
@@ -440,6 +449,7 @@ def run_phase2(
             altitude=row["altitude"],
             is_video=is_video,
             dry_run=dry_run,
+            tz=tz,
         )
 
         if ok:
@@ -494,6 +504,9 @@ if __name__ == "__main__":
     parser.add_argument("--dry-run", action="store_true", help="แสดงคำสั่งแต่ไม่แก้ไฟล์จริง")
     parser.add_argument("--year", help="กรองเฉพาะปี เช่น 2022")
     parser.add_argument("--limit", type=int, help="จำกัดจำนวนไฟล์ที่จะประมวลผล")
+    parser.add_argument("--timezone", default="Asia/Bangkok",
+                        help="Timezone สำหรับแปลงเวลา เช่น Asia/Bangkok (default), US/Eastern")
     args = parser.parse_args()
 
-    run_phase2(args.db, args.dry_run, args.year, args.limit)
+    tz = ZoneInfo(args.timezone)
+    run_phase2(args.db, args.dry_run, args.year, args.limit, tz)

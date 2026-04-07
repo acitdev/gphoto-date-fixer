@@ -70,8 +70,10 @@ def cmd_scan(args):
 
 def cmd_metadata(args):
     """Phase 2: เขียน metadata กลับเข้าไฟล์"""
+    from zoneinfo import ZoneInfo
     from photo_metadata import run_phase2
-    run_phase2(args.db, args.dry_run, args.year, args.limit)
+    tz = ZoneInfo(args.timezone)
+    run_phase2(args.db, args.dry_run, args.year, args.limit, tz)
 
 
 def cmd_livephoto(args):
@@ -82,6 +84,7 @@ def cmd_livephoto(args):
 
 def cmd_all(args):
     """รันทุก Phase ตามลำดับ"""
+    from zoneinfo import ZoneInfo
     print("[*] เริ่มทำงานทุก Phase ตามลำดับ\n")
 
     # Phase 1
@@ -90,7 +93,8 @@ def cmd_all(args):
 
     # Phase 2
     from photo_metadata import run_phase2
-    run_phase2(args.db, args.dry_run, args.year, args.limit)
+    tz = ZoneInfo(args.timezone)
+    run_phase2(args.db, args.dry_run, args.year, args.limit, tz)
 
     # Phase 3
     from photo_livephoto import run_phase3
@@ -218,6 +222,8 @@ def main():
     p_meta.add_argument("--dry-run", action="store_true", help="แสดงคำสั่งแต่ไม่แก้ไฟล์จริง")
     p_meta.add_argument("--year", help="กรองเฉพาะปี เช่น 2022")
     p_meta.add_argument("--limit", type=int, help="จำกัดจำนวนไฟล์")
+    p_meta.add_argument("--timezone", default="Asia/Bangkok",
+                        help="Timezone เช่น Asia/Bangkok (default), US/Eastern")
     p_meta.set_defaults(func=cmd_metadata)
 
     # livephoto
@@ -232,6 +238,8 @@ def main():
     p_all.add_argument("--dry-run", action="store_true", help="แสดงคำสั่งแต่ไม่แก้ไฟล์จริง")
     p_all.add_argument("--year", help="กรองเฉพาะปี เช่น 2022")
     p_all.add_argument("--limit", type=int, help="จำกัดจำนวนไฟล์ (Phase 2)")
+    p_all.add_argument("--timezone", default="Asia/Bangkok",
+                        help="Timezone เช่น Asia/Bangkok (default), US/Eastern")
     p_all.set_defaults(func=cmd_all)
 
     # stats
