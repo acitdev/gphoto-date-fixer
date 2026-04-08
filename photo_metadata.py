@@ -140,15 +140,17 @@ class ExifToolBatch:
 
         output = "\n".join(output_lines)
 
-        # อ่าน stderr ที่มี (non-blocking ด้วย read1 ผ่าน os)
+        # อ่าน stderr ที่มี (non-blocking ด้วย os.read บน raw fd)
+        # ห้ามใช้ .read() ของ TextIOWrapper เพราะจะ block รอ buffer เต็ม
         stderr_text = ""
         try:
             import select
-            while select.select([self._process.stderr], [], [], 0)[0]:
-                chunk = self._process.stderr.read(4096)
+            fd = self._process.stderr.fileno()
+            while select.select([fd], [], [], 0)[0]:
+                chunk = os.read(fd, 4096)
                 if not chunk:
                     break
-                stderr_text += chunk
+                stderr_text += chunk.decode("utf-8", errors="replace")
         except Exception:
             pass
 
