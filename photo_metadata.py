@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sqlite3
 import sys
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -242,8 +243,29 @@ def build_exiftool_args(
 # File date helpers
 # ---------------------------------------------------------------------------
 
+def _resolve_unicode_path(filepath: str) -> str:
+    """แก้ปัญหา Unicode NFC/NFD บน macOS
+
+    macOS (APFS/HFS+) เก็บชื่อไฟล์แบบ NFD (decomposed)
+    แต่ path จาก database อาจเป็น NFC (composed)
+    ถ้าหาไฟล์ไม่เจอ ลอง normalize อีกแบบ
+    """
+    if os.path.exists(filepath):
+        return filepath
+    # ลอง NFD (macOS filesystem)
+    nfd = unicodedata.normalize("NFD", filepath)
+    if os.path.exists(nfd):
+        return nfd
+    # ลอง NFC
+    nfc = unicodedata.normalize("NFC", filepath)
+    if os.path.exists(nfc):
+        return nfc
+    return filepath
+
+
 def update_file_dates(filepath: str, timestamp: int, tz: Optional[ZoneInfo] = None):
     """อัปเดตวันที่ระดับ OS (file modification time + access time + creation date)"""
+    filepath = _resolve_unicode_path(filepath)
     try:
         os.utime(filepath, (timestamp, timestamp))
     except OSError as e:
@@ -364,6 +386,14 @@ def write_metadata_for_file(
         - success: True ถ้าสำเร็จ
         - new_filepath: path ใหม่ถ้าไฟล์ถูกเปลี่ยนชื่อ (หรือ None)
     """
+    # ลบ temp file ค้างจากรอบก่อน (ถ้ามี)
+    tmp = filepath + "_exiftool_tmp"
+    if os.path.exists(tmp):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
     args = build_exiftool_args(
         filepath, timestamp, latitude, longitude, altitude, is_video, tz
     )
