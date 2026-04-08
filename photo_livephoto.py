@@ -1,38 +1,41 @@
 """
-photo_livephoto.py - Phase 3: ประกอบ Live Photo
+photo_livephoto.py - Phase 3: Assemble Live Photos
 
-Apple Live Photo ต้องการ:
-  1. ไฟล์ภาพ (HEIC/JPG) + ไฟล์วิดีโอ (MP4/MOV) ที่ชื่อ stem เดียวกัน
-  2. ทั้งสองไฟล์ต้องมี "Content Identifier" (UUID) เหมือนกัน ฝังใน metadata
-     - ภาพ: MakerNotes:ContentIdentifier (Apple MakerNotes)
-     - วิดีโอ: QuickTime:ContentIdentifier
+Apple Live Photo assembly requires:
+  1. Image file (HEIC/JPG) + video file (MP4/MOV) with the same stem name
+  2. Both files must have matching "Content Identifier" (UUID) embedded in metadata
+     - Image: MakerNotes:ContentIdentifier (Apple MakerNotes)
+     - Video: QuickTime:ContentIdentifier
 
-วิธีใช้:
+Usage:
   python photo_livephoto.py
   python photo_livephoto.py --db photos.db --dry-run
   python photo_livephoto.py --year 2022
 
-หมายเหตุ:
-  - ต้องรัน Phase 1 ก่อน (เพื่อสร้าง live_photos table)
-  - ต้องรัน Phase 2 ก่อน (เพื่อเขียน metadata วันที่/GPS)
-  - ต้องติดตั้ง ExifTool: brew install exiftool
-  - หลังจากรัน Phase 3 แล้ว ต้อง import เข้า Apple Photos app
-    โดยเลือกทั้งไฟล์ภาพและวิดีโอพร้อมกัน Photos app จะรวมเป็น Live Photo อัตโนมัติ
+Requirements:
+  - Phase 1 must be run first (to create live_photos table)
+  - Phase 2 must be run first (to write date/GPS metadata)
+  - ExifTool must be installed: brew install exiftool
+  - After running Phase 3, import into Apple Photos app by selecting both
+    image and video files together; Photos app will automatically merge as Live Photo
 """
 
 import os
 import re
 import shutil
 import subprocess
-import sqlite3
 import sys
 import uuid
 from typing import Optional
 
+from dotenv import load_dotenv
+
 from photo_db import get_connection, print_stats
 
+load_dotenv()
+DEFAULT_DB_PATH = os.getenv("DATABASE_PATH", "google_photos.db")
 
-# regex จับ error "Not a valid X (looks more like a Y)"
+
 _LOOKS_LIKE_RE = re.compile(r"looks more like a (\w+)")
 
 _FORMAT_TO_EXT = {
@@ -47,7 +50,15 @@ _FORMAT_TO_EXT = {
 
 
 def _rename_to_real_format(filepath: str, stderr_output: str) -> Optional[str]:
-    """ถ้า ExifTool บอกว่านามสกุลไม่ตรงกับเนื้อไฟล์จริง ให้เปลี่ยนนามสกุล"""
+    """Rename file if ExifTool detects extension mismatch with actual format.
+
+    Args:
+        filepath: Path to the file to rename
+        stderr_output: stderr output from ExifTool
+
+    Returns:
+        New file path if renamed, None otherwise
+    """
     match = _LOOKS_LIKE_RE.search(stderr_output)
     if not match:
         return None
@@ -73,32 +84,42 @@ def _rename_to_real_format(filepath: str, stderr_output: str) -> Optional[str]:
 
 
 def progress(text: str):
-    """แสดง progress แบบเขียนทับบรรทัดเดิม"""
+    """Display progress with line overwrite."""
     terminal_width = shutil.get_terminal_size((80, 20)).columns
     sys.stdout.write(f"\r{text[:terminal_width]:<{terminal_width}}")
     sys.stdout.flush()
 
 
 def progress_error(text: str):
-    """แสดง error แยกบรรทัดใหม่"""
+    """Display error on a new line."""
     sys.stdout.write(f"\n{text}\n")
     sys.stdout.flush()
 
 
 def check_exiftool() -> bool:
-    """ตรวจสอบว่าติดตั้ง ExifTool แล้วหรือยัง"""
+    """Check if ExifTool is installed.
+
+    Returns:
+        True if ExifTool is available, False otherwise
+    """
     if shutil.which("exiftool") is None:
-        print("[!] ไม่พบ ExifTool!")
-        print("   ติดตั้งด้วย: brew install exiftool")
+        print("[!] ExifTool not found!")
+        print("   Install with: brew install exiftool")
         return False
     return True
 
 
 def read_existing_content_id(filepath: str) -> Optional[str]:
-    """อ่าน ContentIdentifier ที่มีอยู่แล้วในไฟล์ (ถ้ามี)
+    """Read existing ContentIdentifier from file if present.
 
-    บางไฟล์อาจมี ContentIdentifier ฝังอยู่แล้วจากตอนถ่าย
-    ถ้ามี ให้ใช้ค่าเดิม ไม่ต้องสร้างใหม่
+    Some files may already have ContentIdentifier embedded from capture.
+    If found, use the existing value instead of creating a new one.
+
+    Args:
+        filepath: Path to the file to read
+
+    Returns:
+        ContentIdentifier UUID if found, None otherwise
     """
     try:
         result = subprocess.run(
@@ -120,23 +141,21 @@ def write_content_identifier(
     video_path: str,
     content_id: str,
     dry_run: bool = False,
-) -> bool:
-    """ฝัง ContentIdentifier ลงในทั้งไฟล์ภาพและวิดีโอ
+) -> tuple:
+    """Embed ContentIdentifier into both image and video files.
 
     Args:
-        image_path: ที่อยู่ไฟล์ภาพ (HEIC/JPG)
-        video_path: ที่อยู่ไฟล์วิดีโอ (MP4/MOV)
-        content_id: UUID ที่จะฝัง
-        dry_run: แสดงคำสั่งแต่ไม่แก้ไฟล์จริง
+        image_path: Path to image file (HEIC/JPG)
+        video_path: Path to video file (MP4/MOV)
+        content_id: UUID to embed
+        dry_run: Display commands without modifying files
 
     Returns:
-        True ถ้าสำเร็จทั้งคู่
+        Tuple of (success: bool, new_image_path: Optional[str], new_video_path: Optional[str])
     """
-    # คำสั่งสำหรับไฟล์ภาพ
     img_ext = os.path.splitext(image_path)[1].lower()
 
     if img_ext in (".heic", ".heif"):
-        # HEIC: ใช้ MakerNotes (Apple specific)
         img_cmd = [
             "exiftool",
             "-overwrite_original",
@@ -144,7 +163,6 @@ def write_content_identifier(
             image_path,
         ]
     else:
-        # JPG: ใช้ ImageUniqueID ใน EXIF + MakerNotes
         img_cmd = [
             "exiftool",
             "-overwrite_original",
@@ -153,7 +171,6 @@ def write_content_identifier(
             image_path,
         ]
 
-    # คำสั่งสำหรับไฟล์วิดีโอ
     vid_cmd = [
         "exiftool",
         "-overwrite_original",
@@ -169,7 +186,6 @@ def write_content_identifier(
     new_image_path = None
     new_video_path = None
 
-    # ลบ temp file ค้างจากรอบก่อน (ถ้ามี)
     for fp in (image_path, video_path):
         tmp = fp + "_exiftool_tmp"
         if os.path.exists(tmp):
@@ -178,12 +194,10 @@ def write_content_identifier(
             except OSError:
                 pass
 
-    # เขียนลงไฟล์ภาพ
     try:
         result = subprocess.run(img_cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
             stderr = result.stderr.strip()
-            # ลอง rename ถ้านามสกุลไม่ตรง
             if "looks more like a" in stderr:
                 new_image_path = _rename_to_real_format(image_path, stderr)
                 if new_image_path:
@@ -203,19 +217,18 @@ def write_content_identifier(
                         ]
                     result2 = subprocess.run(img_cmd2, capture_output=True, text=True, timeout=30)
                     if result2.returncode != 0:
-                        progress_error(f"  [!]  ExifTool error (ภาพ retry): {result2.stderr.strip()}")
+                        progress_error(f"  [!]  ExifTool error (image retry): {result2.stderr.strip()}")
                         return False, new_image_path, new_video_path
                 else:
-                    progress_error(f"  [!]  ExifTool error (ภาพ): {stderr}")
+                    progress_error(f"  [!]  ExifTool error (image): {stderr}")
                     return False, new_image_path, new_video_path
             else:
-                progress_error(f"  [!]  ExifTool error (ภาพ): {stderr}")
+                progress_error(f"  [!]  ExifTool error (image): {stderr}")
                 return False, new_image_path, new_video_path
     except Exception as e:
-        progress_error(f"  [!]  Error (ภาพ): {e}")
+        progress_error(f"  [!]  Error (image): {e}")
         return False, new_image_path, new_video_path
 
-    # เขียนลงไฟล์วิดีโอ
     try:
         result = subprocess.run(vid_cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
@@ -230,34 +243,43 @@ def write_content_identifier(
                     ]
                     result2 = subprocess.run(vid_cmd2, capture_output=True, text=True, timeout=30)
                     if result2.returncode != 0:
-                        progress_error(f"  [!]  ExifTool error (วิดีโอ retry): {result2.stderr.strip()}")
+                        progress_error(f"  [!]  ExifTool error (video retry): {result2.stderr.strip()}")
                         return False, new_image_path, new_video_path
                 else:
-                    progress_error(f"  [!]  ExifTool error (วิดีโอ): {stderr}")
+                    progress_error(f"  [!]  ExifTool error (video): {stderr}")
                     return False, new_image_path, new_video_path
             else:
-                progress_error(f"  [!]  ExifTool error (วิดีโอ): {stderr}")
+                progress_error(f"  [!]  ExifTool error (video): {stderr}")
                 return False, new_image_path, new_video_path
     except Exception as e:
-        progress_error(f"  [!]  Error (วิดีโอ): {e}")
+        progress_error(f"  [!]  Error (video): {e}")
         return False, new_image_path, new_video_path
 
     return True, new_image_path, new_video_path
 
 
 def run_phase3(
-    db_path: str = "google_photos.db",
+    db_path: str = None,
     dry_run: bool = False,
     year_filter: Optional[str] = None,
 ):
-    """รัน Phase 3: ประกอบ Live Photo ทั้งหมด"""
+    """Assemble all Live Photo pairs by embedding matching ContentIdentifiers.
+
+    Args:
+        db_path: Path to SQLite database (uses DEFAULT_DB_PATH if not provided)
+        dry_run: Display commands without modifying files
+        year_filter: Filter to specific year (e.g., '2022')
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+
     print("=" * 50)
-    print("[*] Phase 3: ประกอบ Live Photo")
+    print("[*] Phase 3: Assemble Live Photos")
     print(f"   Database: {db_path}")
     if dry_run:
-        print("   [*] DRY RUN MODE - ไม่แก้ไขไฟล์จริง")
+        print("   [*] DRY RUN MODE - Files will not be modified")
     if year_filter:
-        print(f"   [*] กรองปี: {year_filter}")
+        print(f"   [*] Year filter: {year_filter}")
     print("=" * 50)
 
     if not dry_run and not check_exiftool():
@@ -266,7 +288,6 @@ def run_phase3(
     conn = get_connection(db_path)
     cursor = conn.cursor()
 
-    # ดึงคู่ Live Photo ที่ยังไม่ได้ประกอบ
     query = """
         SELECT lp.id AS lp_id,
                img.filepath AS image_path, img.filename AS image_name,
@@ -290,10 +311,10 @@ def run_phase3(
 
     total = len(rows)
     if total == 0:
-        print("\n[X] ไม่มีคู่ Live Photo ที่ต้องประกอบ")
+        print("\n[X] No Live Photo pairs to assemble")
         return
 
-    print(f"\n[/] ต้องประกอบ Live Photo: {total:,} คู่")
+    print(f"\n[/] Assembling Live Photo pairs: {total:,}")
 
     success = 0
     failed = 0
@@ -304,21 +325,18 @@ def run_phase3(
         image_name = row["image_name"]
         video_name = row["video_name"]
 
-        # ตรวจสอบว่าทั้งสองไฟล์ยังอยู่
         if not os.path.isfile(image_path):
-            progress_error(f"  [!]  [{i}/{total}] ไม่พบไฟล์ภาพ: {image_path}")
+            progress_error(f"  [!]  [{i}/{total}] Image not found: {image_path}")
             failed += 1
             continue
         if not os.path.isfile(video_path):
-            progress_error(f"  [!]  [{i}/{total}] ไม่พบไฟล์วิดีโอ: {video_path}")
+            progress_error(f"  [!]  [{i}/{total}] Video not found: {video_path}")
             failed += 1
             continue
 
-        # แสดง progress (เขียนทับบรรทัดเดิม)
         pct = i * 100 // total
         progress(f"  [{i:,}/{total:,}] {pct}% {image_name} + {video_name}")
 
-        # ตรวจสอบ ContentIdentifier ที่มีอยู่แล้ว
         existing_img_id = read_existing_content_id(image_path) if not dry_run else None
         existing_vid_id = read_existing_content_id(video_path) if not dry_run else None
 
@@ -344,7 +362,6 @@ def run_phase3(
                     WHERE id = ?
                 """, (content_id, row["lp_id"]))
 
-                # อัปเดต database ถ้าไฟล์ถูก rename
                 if new_img_path:
                     new_fn = os.path.basename(new_img_path)
                     new_stem, new_ext = os.path.splitext(new_fn)
@@ -371,19 +388,18 @@ def run_phase3(
 
     conn.commit()
 
-    # จบ progress line
-    progress(f"  [{total:,}/{total:,}] 100% เสร็จสิ้น")
+    progress(f"  [{total:,}/{total:,}] 100% Complete")
     print()
 
-    print(f"\n[X] สำเร็จ: {success:,} คู่")
+    print(f"\n[X] Success: {success:,} pairs")
     if failed > 0:
-        print(f"[!]  ล้มเหลว: {failed:,} คู่")
+        print(f"[!]  Failed: {failed:,} pairs")
 
-    print("\n[*] ขั้นตอนต่อไป:")
-    print("   1. เปิด Apple Photos app")
-    print("   2. ลากไฟล์ภาพ + วิดีโอ (ที่เป็นคู่กัน) เข้าไปพร้อมกัน")
-    print("   3. Photos app จะรวมเป็น Live Photo อัตโนมัติ")
-    print("   (เพราะทั้งคู่มี ContentIdentifier ตรงกัน)")
+    print("\n[*] Next steps:")
+    print("   1. Open Apple Photos app")
+    print("   2. Drag image + video files (matching pairs) into Photos together")
+    print("   3. Photos app will automatically merge them as Live Photo")
+    print("   (Both files have matching ContentIdentifier)")
 
     print_stats(conn)
     conn.close()
@@ -393,11 +409,22 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Phase 3: ประกอบ Live Photo (ฝัง ContentIdentifier)"
+        description="Phase 3: Assemble Live Photos by embedding ContentIdentifier"
     )
-    parser.add_argument("--db", default="google_photos.db", help="ที่อยู่ไฟล์ SQLite database")
-    parser.add_argument("--dry-run", action="store_true", help="แสดงคำสั่งแต่ไม่แก้ไฟล์จริง")
-    parser.add_argument("--year", help="กรองเฉพาะปี เช่น 2022")
+    parser.add_argument(
+        "--db",
+        default=DEFAULT_DB_PATH,
+        help="Path to SQLite database"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Display commands without modifying files"
+    )
+    parser.add_argument(
+        "--year",
+        help="Filter to specific year (e.g., 2022)"
+    )
     args = parser.parse_args()
 
     run_phase3(args.db, args.dry_run, args.year)

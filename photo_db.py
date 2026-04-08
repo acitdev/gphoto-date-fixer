@@ -1,20 +1,32 @@
-"""
-photo_db.py - โมดูล SQLite Database สำหรับจัดการ metadata ของ Google Takeout Photos
+"""SQLite database module for Google Takeout Photos metadata recovery.
 
-ตาราง:
-  - json_metadata: เก็บข้อมูล metadata จากไฟล์ JSON
-  - media_files:   เก็บรายชื่อไฟล์ภาพ/วิดีโอที่สแกนได้
-  - live_photos:   เก็บคู่ Live Photo (ภาพ + วิดีโอ)
+This module provides database initialization and utilities for the
+gphoto-metadata-toolkit. It manages three main tables:
+  - json_metadata: Metadata from JSON files
+  - media_files: Discovered image and video files
+  - live_photos: Live Photo pairs (image + video)
 """
 
-import sqlite3
 import os
+import sqlite3
+from typing import Dict, List
 
-DEFAULT_DB_PATH = "google_photos.db"
+from dotenv import load_dotenv
+
+load_dotenv()
+DEFAULT_DB_PATH = os.getenv("DATABASE_PATH", "google_photos.db")
+DEFAULT_TIMEZONE = os.getenv("TIMEZONE", "UTC")
 
 
 def get_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
-    """สร้างหรือเปิด connection ไปยัง SQLite database"""
+    """Create or open a connection to the SQLite database.
+
+    Args:
+        db_path: Path to the SQLite database file.
+
+    Returns:
+        A sqlite3.Connection object with Row factory enabled.
+    """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -23,11 +35,22 @@ def get_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
 
 
 def init_db(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
-    """สร้างตารางทั้งหมดใน database (ถ้ายังไม่มี)"""
+    """Initialize the database with required tables and indexes.
+
+    Creates three tables if they don't exist:
+    - json_metadata: Metadata extracted from JSON files
+    - media_files: Discovered image and video files
+    - live_photos: Live Photo pairs linking image and video files
+
+    Args:
+        db_path: Path to the SQLite database file.
+
+    Returns:
+        A sqlite3.Connection object.
+    """
     conn = get_connection(db_path)
     cursor = conn.cursor()
 
-    # ตาราง json_metadata - เก็บข้อมูลจากไฟล์ JSON
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS json_metadata (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,7 +70,6 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
         )
     """)
 
-    # ตาราง media_files - เก็บรายชื่อไฟล์ภาพ/วิดีโอ
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS media_files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,7 +87,6 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
         )
     """)
 
-    # ตาราง live_photos - เก็บคู่ Live Photo
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS live_photos (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,7 +99,6 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
         )
     """)
 
-    # Indexes สำหรับ query ที่ใช้บ่อย
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_json_title ON json_metadata(title)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_media_filename ON media_files(filename)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_media_stem ON media_files(stem)")
@@ -89,10 +109,17 @@ def init_db(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     return conn
 
 
-def get_stats(conn: sqlite3.Connection) -> dict:
-    """ดึงสถิติรวมของ database"""
+def get_stats(conn: sqlite3.Connection) -> Dict[str, any]:
+    """Retrieve comprehensive statistics from the database.
+
+    Args:
+        conn: A sqlite3 database connection.
+
+    Returns:
+        A dictionary containing counts and summaries of database contents.
+    """
     cursor = conn.cursor()
-    stats = {}
+    stats: Dict[str, any] = {}
 
     cursor.execute("SELECT COUNT(*) FROM json_metadata")
     stats["total_json"] = cursor.fetchone()[0]
@@ -127,21 +154,25 @@ def get_stats(conn: sqlite3.Connection) -> dict:
     return stats
 
 
-def print_stats(conn: sqlite3.Connection):
-    """แสดงสถิติรวมของ database"""
+def print_stats(conn: sqlite3.Connection) -> None:
+    """Print formatted database statistics to console.
+
+    Args:
+        conn: A sqlite3 database connection.
+    """
     stats = get_stats(conn)
     print("\n" + "=" * 50)
-    print("[*] สถิติ Database")
+    print("[*] Database Statistics")
     print("=" * 50)
-    print(f"  JSON metadata:      {stats['total_json']:,} ไฟล์")
-    print(f"  Media files:        {stats['total_media']:,} ไฟล์")
-    print(f"    - ภาพ:            {stats['total_images']:,}")
-    print(f"    - วิดีโอ:         {stats['total_videos']:,}")
-    print(f"  จับคู่แล้ว:         {stats['matched']:,}")
-    print(f"  ยังไม่ได้จับคู่:     {stats['unmatched']:,}")
-    print(f"  เขียน metadata แล้ว: {stats['metadata_written']:,}")
-    print(f"  Live Photo pairs:   {stats['live_photo_pairs']:,}")
-    print(f"  Live Photo assembled: {stats['live_photos_assembled']:,}")
+    print(f"  JSON metadata:        {stats['total_json']:,} files")
+    print(f"  Media files:          {stats['total_media']:,} files")
+    print(f"    - Images:           {stats['total_images']:,}")
+    print(f"    - Videos:           {stats['total_videos']:,}")
+    print(f"  Matched:              {stats['matched']:,}")
+    print(f"  Unmatched:            {stats['unmatched']:,}")
+    print(f"  Metadata written:     {stats['metadata_written']:,}")
+    print(f"  Live Photo pairs:     {stats['live_photo_pairs']:,}")
+    print(f"  Live Photos assembled: {stats['live_photos_assembled']:,}")
     if stats["years"]:
-        print(f"  ปีที่พบ:            {', '.join(stats['years'])}")
+        print(f"  Years found:          {', '.join(stats['years'])}")
     print("=" * 50)

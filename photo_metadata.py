@@ -1,16 +1,15 @@
-"""
-photo_metadata.py - Phase 2: เขียน metadata กลับเข้าไฟล์ภาพ/วิดีโอ
+"""Phase 2: Write metadata (dates and GPS) back to photos and videos.
 
-ใช้ ExifTool เขียน:
-  - วันที่ (AllDates / QuickTime dates)
-  - GPS (latitude, longitude, altitude)
-  - อัปเดตวันที่ระดับ OS (file modification/access time)
+Uses ExifTool to write:
+  - Dates (AllDates / QuickTime dates)
+  - GPS coordinates (latitude, longitude, altitude)
+  - OS-level file modification/access times
 
-ข้อกำหนด:
-  - ต้องติดตั้ง ExifTool: brew install exiftool (macOS)
-  - ต้องรัน Phase 1 (photo_scan.py) ก่อน
+Requires ExifTool to be installed:
+  brew install exiftool (macOS)
+  apt-get install exiftool (Ubuntu/Debian)
 
-การใช้งาน:
+Usage:
   python photo_metadata.py
   python photo_metadata.py --db photos.db --dry-run
   python photo_metadata.py --year 2022
@@ -20,68 +19,80 @@ import os
 import re
 import shutil
 import subprocess
-import sqlite3
 import sys
 import unicodedata
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
+from dotenv import load_dotenv
+
 from photo_db import get_connection, print_stats
 
+load_dotenv()
+DEFAULT_DB_PATH = os.getenv("DATABASE_PATH", "google_photos.db")
+DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "Asia/Bangkok")
 
-# ---------------------------------------------------------------------------
-# UI helpers
-# ---------------------------------------------------------------------------
 
 def progress(text: str):
-    """แสดง progress แบบเขียนทับบรรทัดเดิม"""
+    """Display progress text with overwrite (same line)."""
     terminal_width = shutil.get_terminal_size((80, 20)).columns
     sys.stdout.write(f"\r{text[:terminal_width]:<{terminal_width}}")
     sys.stdout.flush()
 
 
 def progress_error(text: str):
-    """แสดง error แยกบรรทัดใหม่ (ไม่ถูกเขียนทับ)"""
+    """Display error message on a new line (no overwrite)."""
     sys.stdout.write(f"\n{text}\n")
     sys.stdout.flush()
 
 
 def check_exiftool() -> bool:
-    """ตรวจสอบว่าติดตั้ง ExifTool แล้วหรือยัง"""
+    """Check if ExifTool is installed.
+
+    Returns:
+        bool: True if exiftool is available, False otherwise.
+    """
     if shutil.which("exiftool") is None:
-        print("[!] ไม่พบ ExifTool!")
-        print("   ติดตั้งด้วย: brew install exiftool")
-        print("   หรือดาวน์โหลดจาก: https://exiftool.org/")
+        print("[!] ExifTool not found!")
+        print("    Install with: brew install exiftool")
+        print("    Or download from: https://exiftool.org/")
         return False
     return True
 
+_READY_PATTERN = re.compile(r"\{ready(\d*)\}")
 
-# ---------------------------------------------------------------------------
-# ExifTool Batch Process  (-stay_open mode)
-# เปิด ExifTool process เดียว ส่งคำสั่งผ่าน stdin → เร็วกว่า subprocess ทีละไฟล์หลายเท่า
-# ---------------------------------------------------------------------------
+_FORMAT_TO_EXT = {
+    "JPEG": ".jpg",
+    "PNG": ".png",
+    "HEIC": ".heic",
+    "TIFF": ".tiff",
+    "GIF": ".gif",
+    "BMP": ".bmp",
+    "WEBP": ".webp",
+    "MP4": ".mp4",
+    "MOV": ".mov",
+}
+
 
 class ExifToolBatch:
-    """จัดการ ExifTool แบบ persistent process (-stay_open True)
+    """Manage ExifTool as a persistent process using -stay_open mode.
 
-    แทนที่จะ spawn process ใหม่ทุกไฟล์ (47,000 ครั้ง)
-    เปิดแค่ครั้งเดียวแล้วส่งคำสั่งผ่าน stdin → ลด overhead 10-50x
+    Launches a single ExifTool instance and sends commands via stdin instead
+    of spawning a new process for each file. This reduces overhead by 10-50x
+    compared to subprocess-per-file.
 
-    Usage:
+    Example:
         with ExifToolBatch() as et:
             ok, stderr = et.execute(["-AllDates=2022:01:01 10:00:00", "photo.jpg"])
     """
-
-    # sentinel ที่ ExifTool ส่งกลับมาเมื่อจบแต่ละคำสั่ง
-    _READY_PATTERN = re.compile(r"\{ready(\d*)\}")
 
     def __init__(self):
         self._process: Optional[subprocess.Popen] = None
         self._seq = 0
 
     def start(self):
-        """เริ่ม ExifTool process"""
+        """Start the ExifTool process in -stay_open mode."""
         self._process = subprocess.Popen(
             ["exiftool", "-stay_open", "True", "-@", "-"],
             stdin=subprocess.PIPE,
@@ -91,7 +102,7 @@ class ExifToolBatch:
         )
 
     def stop(self):
-        """ปิด ExifTool process"""
+        """Stop the ExifTool process gracefully."""
         if self._process and self._process.poll() is None:
             try:
                 self._process.stdin.write("-stay_open\nFalse\n")
@@ -108,13 +119,13 @@ class ExifToolBatch:
         self.stop()
 
     def execute(self, args: list[str]) -> tuple[bool, str]:
-        """ส่งคำสั่งเข้า ExifTool แล้วรอผลลัพธ์
+        """Send command to ExifTool and wait for result.
 
         Args:
-            args: list ของ arguments (ไม่ต้องมี "exiftool" นำหน้า)
+            args: List of command arguments (without "exiftool" prefix).
 
         Returns:
-            (success, output) — output รวม stdout+stderr
+            Tuple of (success, output) where output combines stdout+stderr.
         """
         if not self._process or self._process.poll() is not None:
             return False, "ExifTool process not running"
@@ -122,27 +133,23 @@ class ExifToolBatch:
         self._seq += 1
         seq = self._seq
 
-        # ส่ง arguments ทีละบรรทัด จบด้วย -execute{seq}
         for arg in args:
             self._process.stdin.write(arg + "\n")
         self._process.stdin.write(f"-execute{seq}\n")
         self._process.stdin.flush()
 
-        # อ่าน stdout จนเจอ {ready{seq}}
         output_lines = []
         while True:
             line = self._process.stdout.readline()
             if not line:
                 break
-            m = self._READY_PATTERN.match(line.strip())
+            m = _READY_PATTERN.match(line.strip())
             if m:
                 break
             output_lines.append(line.rstrip("\n"))
 
         output = "\n".join(output_lines)
 
-        # อ่าน stderr ที่มี (non-blocking ด้วย os.read บน raw fd)
-        # ห้ามใช้ .read() ของ TextIOWrapper เพราะจะ block รอ buffer เต็ม
         stderr_text = ""
         try:
             import select
@@ -155,15 +162,10 @@ class ExifToolBatch:
         except Exception:
             pass
 
-        # ตรวจสอบว่าสำเร็จ: ExifTool พิมพ์ "1 image files updated" เมื่อสำเร็จ
         success = "updated" in output or "unchanged" in output
         full_output = stderr_text.strip() if stderr_text.strip() else output
         return success, full_output
 
-
-# ---------------------------------------------------------------------------
-# ExifTool argument builders
-# ---------------------------------------------------------------------------
 
 def build_exiftool_args(
     filepath: str,
@@ -174,25 +176,24 @@ def build_exiftool_args(
     is_video: bool = False,
     tz: Optional[ZoneInfo] = None,
 ) -> list[str]:
-    """สร้าง arguments สำหรับ ExifTool (ไม่มี "exiftool" นำหน้า)
+    """Build ExifTool command arguments.
 
     Args:
-        filepath: ที่อยู่ไฟล์
-        timestamp: Unix timestamp ของ photoTakenTime
-        latitude: ละติจูด (หรือ None)
-        longitude: ลองจิจูด (หรือ None)
-        altitude: ความสูง (หรือ None)
-        is_video: เป็นไฟล์วิดีโอหรือไม่
-        tz: timezone สำหรับแปลงเวลา (None = UTC)
+        filepath: Path to the file.
+        timestamp: Unix timestamp from photoTakenTime.
+        latitude: Latitude coordinate or None.
+        longitude: Longitude coordinate or None.
+        altitude: Altitude or None.
+        is_video: True if file is a video.
+        tz: Timezone for time conversion (None = UTC).
 
     Returns:
-        list ของ arguments
+        List of ExifTool command arguments.
     """
-    # แปลง timestamp เป็นเวลาท้องถิ่น
     target_tz = tz or timezone.utc
     dt = datetime.fromtimestamp(timestamp, tz=target_tz)
     date_str = dt.strftime("%Y:%m:%d %H:%M:%S")
-    offset_str = dt.strftime("%z")  # เช่น "+0700"
+    offset_str = dt.strftime("%z")
     offset_fmt = f"{offset_str[:3]}:{offset_str[3:]}" if offset_str else "+00:00"
 
     args = [
@@ -218,7 +219,6 @@ def build_exiftool_args(
             f"-EXIF:OffsetTimeDigitized={offset_fmt}",
         ])
 
-    # GPS coordinates
     if latitude is not None and longitude is not None:
         lat_ref = "N" if latitude >= 0 else "S"
         lon_ref = "E" if longitude >= 0 else "W"
@@ -239,24 +239,18 @@ def build_exiftool_args(
     return args
 
 
-# ---------------------------------------------------------------------------
-# File date helpers
-# ---------------------------------------------------------------------------
-
 def _resolve_unicode_path(filepath: str) -> str:
-    """แก้ปัญหา Unicode NFC/NFD บน macOS
+    """Resolve Unicode normalization issues on macOS.
 
-    macOS (APFS/HFS+) เก็บชื่อไฟล์แบบ NFD (decomposed)
-    แต่ path จาก database อาจเป็น NFC (composed)
-    ถ้าหาไฟล์ไม่เจอ ลอง normalize อีกแบบ
+    macOS filesystems (APFS/HFS+) store names in NFD (decomposed) form,
+    while paths from the database may be NFC (composed). This function
+    finds the correct filesystem path.
     """
     if os.path.exists(filepath):
         return filepath
-    # ลอง NFD (macOS filesystem)
     nfd = unicodedata.normalize("NFD", filepath)
     if os.path.exists(nfd):
         return nfd
-    # ลอง NFC
     nfc = unicodedata.normalize("NFC", filepath)
     if os.path.exists(nfc):
         return nfc
@@ -264,15 +258,20 @@ def _resolve_unicode_path(filepath: str) -> str:
 
 
 def update_file_dates(filepath: str, timestamp: int, tz: Optional[ZoneInfo] = None):
-    """อัปเดตวันที่ระดับ OS (file modification time + access time + creation date)"""
+    """Update OS-level file dates (modification, access, and creation time).
+
+    Args:
+        filepath: Path to the file.
+        timestamp: Unix timestamp to set.
+        tz: Timezone for conversion (None = UTC).
+    """
     filepath = _resolve_unicode_path(filepath)
     try:
         os.utime(filepath, (timestamp, timestamp))
     except OSError as e:
-        print(f"  [!]  อัปเดตวันที่ OS ไม่ได้: {filepath} ({e})")
+        print(f"  [!] Failed to update OS file date: {filepath} ({e})")
         return
 
-    # macOS: ตั้ง creation date ด้วย SetFile
     try:
         target_tz = tz or timezone.utc
         dt = datetime.fromtimestamp(timestamp, tz=target_tz)
@@ -293,29 +292,18 @@ def update_file_dates(filepath: str, timestamp: int, tz: Optional[ZoneInfo] = No
         pass
 
 
-# ---------------------------------------------------------------------------
-# File rename / repair helpers
-# ---------------------------------------------------------------------------
-
-# regex จับ error "Not a valid X (looks more like a Y)"
 _LOOKS_LIKE_RE = re.compile(r"looks more like a (\w+)")
-
-# mapping ชื่อ format ที่ ExifTool บอก → นามสกุลไฟล์ที่ถูกต้อง
-_FORMAT_TO_EXT = {
-    "JPEG": ".jpg",
-    "PNG": ".png",
-    "HEIC": ".heic",
-    "TIFF": ".tiff",
-    "GIF": ".gif",
-    "BMP": ".bmp",
-    "WEBP": ".webp",
-    "MP4": ".mp4",
-    "MOV": ".mov",
-}
 
 
 def find_renamed_file(filepath: str) -> Optional[str]:
-    """หาไฟล์ที่อาจถูกเปลี่ยนนามสกุลไปแล้วจากรอบก่อน"""
+    """Find a file that may have been renamed in a previous run.
+
+    Args:
+        filepath: Original file path to check.
+
+    Returns:
+        Path to the found file, or None if not found.
+    """
     base = os.path.splitext(filepath)[0]
     for ext in (".jpg", ".jpeg", ".png", ".heic", ".mp4", ".mov"):
         candidate = base + ext
@@ -329,7 +317,18 @@ def find_renamed_file(filepath: str) -> Optional[str]:
 
 
 def rename_to_real_format(filepath: str, output: str) -> Optional[str]:
-    """ถ้า ExifTool บอกว่านามสกุลไม่ตรงกับเนื้อไฟล์จริง ให้เปลี่ยนนามสกุล"""
+    """Rename file extension to match actual file format.
+
+    ExifTool detects when file extension doesn't match the actual format.
+    This function renames the file to the correct extension.
+
+    Args:
+        filepath: Path to the file.
+        output: ExifTool output containing format detection.
+
+    Returns:
+        New path if renamed, or None if rename failed or not needed.
+    """
     match = _LOOKS_LIKE_RE.search(output)
     if not match:
         return None
@@ -355,7 +354,14 @@ def rename_to_real_format(filepath: str, output: str) -> Optional[str]:
 
 
 def repair_image(filepath: str) -> bool:
-    """ซ่อมไฟล์ภาพที่โครงสร้างภายในเสียหาย โดยเปิดแล้วเซฟใหม่ด้วย Pillow"""
+    """Attempt to repair corrupted image by rewriting with Pillow.
+
+    Args:
+        filepath: Path to the image file.
+
+    Returns:
+        True if repair succeeded, False otherwise.
+    """
     try:
         from PIL import Image
         img = Image.open(filepath)
@@ -364,10 +370,6 @@ def repair_image(filepath: str) -> bool:
     except Exception:
         return False
 
-
-# ---------------------------------------------------------------------------
-# Per-file metadata writer (ใช้ ExifToolBatch)
-# ---------------------------------------------------------------------------
 
 def write_metadata_for_file(
     et: ExifToolBatch,
@@ -379,14 +381,22 @@ def write_metadata_for_file(
     is_video: bool,
     tz: Optional[ZoneInfo] = None,
 ) -> tuple[bool, Optional[str]]:
-    """เขียน metadata ลงในไฟล์เดียว ผ่าน ExifToolBatch
+    """Write metadata to a single file using ExifToolBatch.
+
+    Args:
+        et: ExifToolBatch instance.
+        filepath: Path to the file.
+        timestamp: Unix timestamp to write.
+        latitude: Latitude coordinate or None.
+        longitude: Longitude coordinate or None.
+        altitude: Altitude or None.
+        is_video: True if file is a video.
+        tz: Timezone for conversion (None = UTC).
 
     Returns:
-        (success, new_filepath)
-        - success: True ถ้าสำเร็จ
-        - new_filepath: path ใหม่ถ้าไฟล์ถูกเปลี่ยนชื่อ (หรือ None)
+        Tuple of (success, new_filepath) where new_filepath is the path
+        if the file was renamed, or None otherwise.
     """
-    # ลบ temp file ค้างจากรอบก่อน (ถ้ามี)
     tmp = filepath + "_exiftool_tmp"
     if os.path.exists(tmp):
         try:
@@ -401,7 +411,6 @@ def write_metadata_for_file(
     ok, output = et.execute(args)
 
     if not ok:
-        # ลอง retry ถ้า ExifTool บอกว่านามสกุลไม่ตรง
         if "looks more like a" in output:
             new_path = rename_to_real_format(filepath, output)
             if new_path:
@@ -414,12 +423,11 @@ def write_metadata_for_file(
                     return True, new_path
                 else:
                     progress_error(
-                        f"  [!]  ExifTool error (retry): {new_path}\n"
+                        f"  [!] ExifTool error (retry): {new_path}\n"
                         f"      {output2}"
                     )
                     return False, new_path
 
-        # ลองซ่อมภาพแล้ว retry (เฉพาะไฟล์ภาพ ไม่ใช่วิดีโอ)
         if not is_video and repair_image(filepath):
             ok3, output3 = et.execute(args)
             if ok3:
@@ -427,35 +435,44 @@ def write_metadata_for_file(
                 return True, None
 
         progress_error(
-            f"  [!]  ExifTool error: {filepath}\n"
+            f"  [!] ExifTool error: {filepath}\n"
             f"      {output}"
         )
         return False, None
 
-    # อัปเดตวันที่ระดับ OS
     update_file_dates(filepath, timestamp, tz)
     return True, None
 
 
-# ---------------------------------------------------------------------------
-# Main phase runner
-# ---------------------------------------------------------------------------
 
 def run_phase2(
-    db_path: str = "google_photos.db",
+    db_path: str = None,
     dry_run: bool = False,
     year_filter: Optional[str] = None,
     limit: Optional[int] = None,
     tz: Optional[ZoneInfo] = None,
 ):
-    """รัน Phase 2: เขียน metadata กลับเข้าไฟล์ทั้งหมดที่จับคู่ได้"""
+    """Run Phase 2: Write metadata back to all matched media files.
+
+    Args:
+        db_path: Path to SQLite database. Defaults to DATABASE_PATH env var.
+        dry_run: If True, show commands without modifying files.
+        year_filter: Optional year folder to filter (e.g., "2022").
+        limit: Optional limit on number of files to process.
+        tz: Timezone for time conversion. Defaults to DEFAULT_TIMEZONE env var.
+    """
+    if db_path is None:
+        db_path = DEFAULT_DB_PATH
+    if tz is None:
+        tz = ZoneInfo(DEFAULT_TIMEZONE)
+
     print("=" * 50)
-    print("[*] Phase 2: เขียน metadata กลับเข้าไฟล์")
-    print(f"   Database: {db_path}")
-    print(f"   Timezone: {tz or 'UTC'}")
-    print(f"   Mode: {'batch (-stay_open)' if not dry_run else 'DRY RUN'}")
+    print("[*] Phase 2: Write metadata back to files")
+    print(f"    Database: {db_path}")
+    print(f"    Timezone: {tz or 'UTC'}")
+    print(f"    Mode: {'batch (-stay_open)' if not dry_run else 'DRY RUN'}")
     if year_filter:
-        print(f"   [*] กรองปี: {year_filter}")
+        print(f"    Year filter: {year_filter}")
     print("=" * 50)
 
     if not dry_run and not check_exiftool():
@@ -464,7 +481,6 @@ def run_phase2(
     conn = get_connection(db_path)
     cursor = conn.cursor()
 
-    # ดึงไฟล์ที่จับคู่กับ JSON แล้วแต่ยังไม่ได้เขียน metadata
     query = """
         SELECT m.id, m.filepath, m.filename, m.is_video,
                j.photo_taken_timestamp, j.creation_timestamp,
@@ -490,30 +506,27 @@ def run_phase2(
 
     total = len(rows)
     if total == 0:
-        print("\n[X] ไม่มีไฟล์ที่ต้องเขียน metadata (ทำหมดแล้วหรือยังไม่ได้จับคู่)")
+        print("\n[X] No files to write metadata (already done or no matches)")
         return
 
-    print(f"\n[/] ต้องเขียน metadata: {total:,} ไฟล์\n")
+    print(f"\n[/] Files to process: {total:,}\n")
 
     success = 0
     failed = 0
     renamed = 0
 
-    # เปิด ExifTool batch process ตัวเดียว ใช้ตลอด
     with ExifToolBatch() as et:
         for i, row in enumerate(rows, 1):
             filepath = row["filepath"]
             filename = row["filename"]
             is_video = bool(row["is_video"])
 
-            # ใช้ photoTakenTime ก่อน ถ้าไม่มีใช้ creationTime
             timestamp = row["photo_taken_timestamp"] or row["creation_timestamp"]
             if timestamp is None:
-                progress_error(f"  [!]  [{i}/{total}] ไม่มี timestamp: {filename}")
+                progress_error(f"  [!] [{i}/{total}] No timestamp: {filename}")
                 failed += 1
                 continue
 
-            # ตรวจสอบว่าไฟล์ยังอยู่ (อาจถูกเปลี่ยนนามสกุลจากรอบก่อน)
             if not os.path.isfile(filepath):
                 found = find_renamed_file(filepath)
                 if found:
@@ -526,11 +539,10 @@ def run_phase2(
                         WHERE id = ?
                     """, (filepath, filename, new_stem, new_ext.lower(), row["id"]))
                 else:
-                    progress_error(f"  [!]  [{i}/{total}] ไม่พบไฟล์: {filepath}")
+                    progress_error(f"  [!] [{i}/{total}] File not found: {filepath}")
                     failed += 1
                     continue
 
-            # แสดง progress
             target_tz = tz or timezone.utc
             dt = datetime.fromtimestamp(timestamp, tz=target_tz)
             date_display = dt.strftime("%Y-%m-%d %H:%M")
@@ -577,7 +589,6 @@ def run_phase2(
                         "UPDATE media_files SET metadata_written = 1 WHERE id = ?",
                         (row["id"],)
                     )
-                # Commit ทุก 100 ไฟล์
                 if i % 100 == 0:
                     conn.commit()
             else:
@@ -585,15 +596,14 @@ def run_phase2(
 
     conn.commit()
 
-    # จบ progress line
-    progress(f"  [{total:,}/{total:,}] 100% เสร็จสิ้น")
+    progress(f"  [{total:,}/{total:,}] 100% Complete")
     print()
 
-    print(f"\n[X] สำเร็จ: {success:,} ไฟล์")
+    print(f"\n[X] Success: {success:,} files")
     if renamed > 0:
-        print(f"[*] เปลี่ยนนามสกุลให้ตรงเนื้อไฟล์: {renamed:,} ไฟล์")
+        print(f"[*] Renamed to correct format: {renamed:,} files")
     if failed > 0:
-        print(f"[!]  ล้มเหลว: {failed:,} ไฟล์")
+        print(f"[!] Failed: {failed:,} files")
 
     print_stats(conn)
     conn.close()
@@ -603,14 +613,32 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Phase 2: เขียน metadata (วันที่/GPS) กลับเข้าไฟล์ภาพ/วิดีโอ"
+        description="Phase 2: Write metadata (dates and GPS) back to photos and videos"
     )
-    parser.add_argument("--db", default="google_photos.db", help="ที่อยู่ไฟล์ SQLite database")
-    parser.add_argument("--dry-run", action="store_true", help="แสดงคำสั่งแต่ไม่แก้ไฟล์จริง")
-    parser.add_argument("--year", help="กรองเฉพาะปี เช่น 2022")
-    parser.add_argument("--limit", type=int, help="จำกัดจำนวนไฟล์ที่จะประมวลผล")
-    parser.add_argument("--timezone", default="Asia/Bangkok",
-                        help="Timezone สำหรับแปลงเวลา เช่น Asia/Bangkok (default), US/Eastern")
+    parser.add_argument(
+        "--db",
+        default=DEFAULT_DB_PATH,
+        help=f"Path to SQLite database (default: {DEFAULT_DB_PATH})"
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show commands without modifying files"
+    )
+    parser.add_argument(
+        "--year",
+        help="Filter to specific year folder (e.g., 2022)"
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        help="Limit number of files to process"
+    )
+    parser.add_argument(
+        "--timezone",
+        default=DEFAULT_TIMEZONE,
+        help=f"Timezone for time conversion (default: {DEFAULT_TIMEZONE})"
+    )
     args = parser.parse_args()
 
     tz = ZoneInfo(args.timezone)

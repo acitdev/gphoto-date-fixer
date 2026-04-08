@@ -1,75 +1,105 @@
 #!/usr/bin/env python3
 """
-photos.py - เครื่องมือจัดการ Google Takeout Photos
+gphoto-metadata-toolkit: Google Takeout Photos Metadata Recovery Toolkit.
 
-คืน metadata (วันที่, GPS) กลับเข้าไฟล์ภาพ/วิดีโอ
-และประกอบ Live Photo จากไฟล์ที่ถูกแยกออกจากกัน
+This module is the main CLI entry point for recovering and restoring metadata
+from Google Takeout archives. It provides three main processing phases:
 
-โครงสร้างไฟล์:
-  photos.py           - ไฟล์นี้ (main entry point)
-  photo_db.py         - โมดูล SQLite database
-  photo_scan.py       - Phase 1: สแกน JSON + Media ลง SQLite
-  photo_metadata.py   - Phase 2: เขียน metadata กลับเข้าไฟล์
-  photo_livephoto.py  - Phase 3: ประกอบ Live Photo
+1. **Scan Phase**: Index all JSON metadata and media files into SQLite
+2. **Metadata Phase**: Restore date and GPS metadata to image/video files
+3. **Live Photo Phase**: Reassemble Live Photo pairs from separated files
 
-ข้อกำหนด:
+Features:
+  - Recover lost EXIF/metadata using Google's JSON records
+  - Restore original timestamps and geolocation data
+  - Reassemble Live Photo pairs (image + video) from Google Takeout
+  - Dry-run mode for safe testing before applying changes
+  - Per-year filtering and batch processing
+  - Comprehensive database queries for data inspection
+
+File Structure:
+  photos.py           - This file (main entry point)
+  photo_db.py         - SQLite database schema and utilities
+  photo_scan.py       - Phase 1: scan JSON + media files to database
+  photo_metadata.py   - Phase 2: write metadata back to files
+  photo_livephoto.py  - Phase 3: assemble Live Photo pairs
+
+Requirements:
   - Python 3.10+
-  - ExifTool: brew install exiftool
+  - ExifTool: brew install exiftool (macOS) or apt install exiftool (Linux)
 
-การใช้งาน:
-  # รัน Phase 1: สแกนข้อมูลทั้งหมด
+Usage Examples:
+  # Phase 1: Index all files from Google Takeout
   python photos.py scan /path/to/takeout
 
-  # รัน Phase 2: เขียน metadata กลับ (ลองก่อนด้วย --dry-run)
+  # Phase 2: Restore metadata (test first with --dry-run)
   python photos.py metadata --dry-run
   python photos.py metadata
   python photos.py metadata --year 2022
 
-  # รัน Phase 3: ประกอบ Live Photo
+  # Phase 3: Assemble Live Photos
   python photos.py livephoto --dry-run
   python photos.py livephoto
 
-  # รันทุก Phase ตามลำดับ
+  # Run all phases in sequence
   python photos.py all /path/to/takeout
 
-  # ดูสถิติ
+  # View statistics
   python photos.py stats
 
-  # Query ข้อมูลในฐานข้อมูล
+  # Query database
   python photos.py query --unmatched
-  python photos.py query --year 2023 --has-gps
+  python photos.py query --year 2023
+  python photos.py query --live-photos
 
-ตัวอย่างโครงสร้าง Takeout:
+Takeout Directory Structure:
   /path/to/takeout/
   ├── 2022/
   │   ├── IMG_0001.HEIC
   │   ├── IMG_0001.HEIC.supplemental-metadata.json
   │   ├── IMG_0001.mp4
   │   ├── 3aae020f...mov
-  │   └── 3aae020f...mov.supplemen.json
+  │   └── 3aae020f...mov.supplemental-metadata.json
   ├── 2023/
   │   └── ...
   ├── 2024/
   │   └── ...
   └── 2025/
       └── ...
+
+Configuration:
+  Database path and default timezone can be configured via environment variables:
+  - DATABASE_PATH: Path to SQLite database (default: google_photos.db)
+  - DEFAULT_TIMEZONE: Default timezone (default: Asia/Bangkok)
+
+  Create a .env file in the working directory to set these values:
+    DATABASE_PATH=~/my_photos/database.db
+    DEFAULT_TIMEZONE=US/Eastern
 """
 
 import argparse
-import sys
 import os
+import sys
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Configuration defaults from environment or hardcoded values
+DEFAULT_DB_PATH = os.getenv("DATABASE_PATH", "google_photos.db")
+DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "Asia/Bangkok")
 
 from photo_db import init_db, get_connection, print_stats
 
 
 def cmd_scan(args):
-    """Phase 1: สแกน JSON + Media ลง SQLite"""
+    """Phase 1: Index JSON metadata and media files into SQLite database."""
     from photo_scan import run_phase1
     run_phase1(args.root_dir, args.db)
 
 
 def cmd_metadata(args):
-    """Phase 2: เขียน metadata กลับเข้าไฟล์"""
+    """Phase 2: Restore date and GPS metadata to image and video files."""
     from zoneinfo import ZoneInfo
     from photo_metadata import run_phase2
     tz = ZoneInfo(args.timezone)
@@ -77,37 +107,37 @@ def cmd_metadata(args):
 
 
 def cmd_livephoto(args):
-    """Phase 3: ประกอบ Live Photo"""
+    """Phase 3: Assemble Live Photo pairs from separated image and video files."""
     from photo_livephoto import run_phase3
     run_phase3(args.db, args.dry_run, args.year)
 
 
 def cmd_all(args):
-    """รันทุก Phase ตามลำดับ"""
+    """Execute all three processing phases in sequence."""
     from zoneinfo import ZoneInfo
-    print("[*] เริ่มทำงานทุก Phase ตามลำดับ\n")
+    print("[*] Running all phases in sequence...\n")
 
-    # Phase 1
+    # Phase 1: Scan
     from photo_scan import run_phase1
     run_phase1(args.root_dir, args.db)
 
-    # Phase 2
+    # Phase 2: Metadata
     from photo_metadata import run_phase2
     tz = ZoneInfo(args.timezone)
     run_phase2(args.db, args.dry_run, args.year, args.limit, tz)
 
-    # Phase 3
+    # Phase 3: Live Photo
     from photo_livephoto import run_phase3
     run_phase3(args.db, args.dry_run, args.year)
 
-    print("\n[X] ทำงานครบทุก Phase แล้ว!")
+    print("\n[X] All phases completed!")
 
 
 def cmd_stats(args):
-    """แสดงสถิติ"""
+    """Display statistics and summary from the database."""
     if not os.path.exists(args.db):
-        print(f"[!] ไม่พบ database: {args.db}")
-        print("   กรุณารัน phase 'scan' ก่อน")
+        print(f"[!] Database not found: {args.db}")
+        print("    Please run the 'scan' phase first")
         return
     conn = get_connection(args.db)
     print_stats(conn)
@@ -115,16 +145,16 @@ def cmd_stats(args):
 
 
 def cmd_query(args):
-    """Query ข้อมูลในฐานข้อมูล"""
+    """Query and inspect data in the database with various filters."""
     if not os.path.exists(args.db):
-        print(f"[!] ไม่พบ database: {args.db}")
+        print(f"[!] Database not found: {args.db}")
         return
 
     conn = get_connection(args.db)
     cursor = conn.cursor()
 
     if args.unmatched:
-        print("\n[*] ไฟล์ media ที่ยังไม่ได้จับคู่กับ JSON:")
+        print("\n[*] Media files not matched with JSON metadata:")
         cursor.execute("""
             SELECT filename, year_folder, extension, file_size
             FROM media_files
@@ -135,10 +165,10 @@ def cmd_query(args):
         for row in rows:
             size_mb = (row["file_size"] or 0) / 1024 / 1024
             print(f"  {row['year_folder'] or '??'} | {row['filename']} ({size_mb:.1f} MB)")
-        print(f"\n  รวม: {len(rows):,} ไฟล์")
+        print(f"\n  Total: {len(rows):,} files")
 
     elif args.unmatched_json:
-        print("\n[*] JSON metadata ที่ไม่มีไฟล์ media จับคู่:")
+        print("\n[*] JSON metadata with no matching media file:")
         cursor.execute("""
             SELECT j.title, j.year_folder
             FROM json_metadata j
@@ -149,10 +179,10 @@ def cmd_query(args):
         rows = cursor.fetchall()
         for row in rows:
             print(f"  {row['year_folder'] or '??'} | {row['title']}")
-        print(f"\n  รวม: {len(rows):,} ไฟล์")
+        print(f"\n  Total: {len(rows):,} files")
 
     elif args.live_photos:
-        print("\n[/] คู่ Live Photo ที่พบ:")
+        print("\n[/] Live Photo pairs found:")
         cursor.execute("""
             SELECT img.filename AS img, vid.filename AS vid,
                    lp.content_identifier AS cid, lp.assembled,
@@ -167,11 +197,11 @@ def cmd_query(args):
             status = "[X]" if row["assembled"] else "[ ]"
             cid = row["cid"][:8] + "..." if row["cid"] else "—"
             print(f"  {status} {row['year_folder'] or '??'} | {row['img']} + {row['vid']} [{cid}]")
-        print(f"\n  รวม: {len(rows):,} คู่")
+        print(f"\n  Total: {len(rows):,} pairs")
 
     else:
-        # แสดงภาพรวมตามปี
-        print("\n[*] สรุปตามปี:")
+        # Summary by year
+        print("\n[*] Summary by year:")
         cursor.execute("""
             SELECT year_folder,
                    COUNT(*) AS total,
@@ -184,73 +214,150 @@ def cmd_query(args):
             ORDER BY year_folder
         """)
         rows = cursor.fetchall()
-        print(f"  {'ปี':<8} {'รวม':>8} {'ภาพ':>8} {'วิดีโอ':>8} {'จับคู่':>8} {'เขียนแล้ว':>10}")
+        print(f"  {'Year':<8} {'Total':>8} {'Images':>8} {'Videos':>8} {'Matched':>8} {'Written':>10}")
         print(f"  {'─' * 8} {'─' * 8} {'─' * 8} {'─' * 8} {'─' * 8} {'─' * 10}")
         for row in rows:
-            yr = row["year_folder"] or "ไม่ทราบ"
+            yr = row["year_folder"] or "Unknown"
             print(f"  {yr:<8} {row['total']:>8,} {row['images']:>8,} {row['videos']:>8,} {row['matched']:>8,} {row['written']:>10,}")
 
     conn.close()
 
 
 def main():
+    """Parse command-line arguments and execute the appropriate command."""
     parser = argparse.ArgumentParser(
-        description="Google Takeout Photos - คืน metadata และประกอบ Live Photo",
+        description="gphoto-metadata-toolkit: Recover and restore metadata from Google Takeout archives",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-ตัวอย่างการใช้งาน:
-  python photos.py scan ~/Takeout           # สแกนข้อมูล
-  python photos.py metadata --dry-run       # ทดลองเขียน metadata
-  python photos.py metadata                 # เขียน metadata จริง
-  python photos.py livephoto                # ประกอบ Live Photo
-  python photos.py all ~/Takeout --dry-run  # รันทุก phase (ทดลอง)
-  python photos.py stats                    # ดูสถิติ
-  python photos.py query --unmatched        # ดูไฟล์ที่ไม่ได้จับคู่
+Examples:
+  python photos.py scan ~/Takeout              # Index files from Takeout
+  python photos.py metadata --dry-run          # Test metadata restoration
+  python photos.py metadata                    # Restore metadata
+  python photos.py livephoto                   # Assemble Live Photos
+  python photos.py all ~/Takeout --dry-run     # Run all phases (test mode)
+  python photos.py stats                       # View statistics
+  python photos.py query --unmatched           # Find unmatched files
+  python photos.py query --live-photos         # List Live Photo pairs
         """
     )
-    parser.add_argument("--db", default="google_photos.db", help="ที่อยู่ไฟล์ SQLite database")
+    parser.add_argument(
+        "--db",
+        default=DEFAULT_DB_PATH,
+        help=f"Path to SQLite database (default: {DEFAULT_DB_PATH})"
+    )
 
-    subparsers = parser.add_subparsers(dest="command", help="คำสั่งที่ต้องการ")
+    subparsers = parser.add_subparsers(dest="command", help="Command to execute")
 
-    # scan
-    p_scan = subparsers.add_parser("scan", help="Phase 1: สแกน JSON + Media ลง SQLite")
-    p_scan.add_argument("root_dir", help="โฟลเดอร์ root ที่มีโฟลเดอร์ปี")
+    # Scan subcommand
+    p_scan = subparsers.add_parser(
+        "scan",
+        help="Phase 1: Index JSON metadata and media files into database"
+    )
+    p_scan.add_argument(
+        "root_dir",
+        help="Root directory containing year folders from Google Takeout"
+    )
     p_scan.set_defaults(func=cmd_scan)
 
-    # metadata
-    p_meta = subparsers.add_parser("metadata", help="Phase 2: เขียน metadata กลับเข้าไฟล์")
-    p_meta.add_argument("--dry-run", action="store_true", help="แสดงคำสั่งแต่ไม่แก้ไฟล์จริง")
-    p_meta.add_argument("--year", help="กรองเฉพาะปี เช่น 2022")
-    p_meta.add_argument("--limit", type=int, help="จำกัดจำนวนไฟล์")
-    p_meta.add_argument("--timezone", default="Asia/Bangkok",
-                        help="Timezone เช่น Asia/Bangkok (default), US/Eastern")
+    # Metadata subcommand
+    p_meta = subparsers.add_parser(
+        "metadata",
+        help="Phase 2: Restore date and GPS metadata to media files"
+    )
+    p_meta.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show commands without modifying files"
+    )
+    p_meta.add_argument(
+        "--year",
+        help="Filter by year (e.g., 2022)"
+    )
+    p_meta.add_argument(
+        "--limit",
+        type=int,
+        help="Limit number of files to process"
+    )
+    p_meta.add_argument(
+        "--timezone",
+        default=DEFAULT_TIMEZONE,
+        help=f"Timezone for date conversion (default: {DEFAULT_TIMEZONE})"
+    )
     p_meta.set_defaults(func=cmd_metadata)
 
-    # livephoto
-    p_live = subparsers.add_parser("livephoto", help="Phase 3: ประกอบ Live Photo")
-    p_live.add_argument("--dry-run", action="store_true", help="แสดงคำสั่งแต่ไม่แก้ไฟล์จริง")
-    p_live.add_argument("--year", help="กรองเฉพาะปี เช่น 2022")
+    # Live Photo subcommand
+    p_live = subparsers.add_parser(
+        "livephoto",
+        help="Phase 3: Assemble Live Photo pairs"
+    )
+    p_live.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show commands without modifying files"
+    )
+    p_live.add_argument(
+        "--year",
+        help="Filter by year (e.g., 2022)"
+    )
     p_live.set_defaults(func=cmd_livephoto)
 
-    # all
-    p_all = subparsers.add_parser("all", help="รันทุก Phase ตามลำดับ")
-    p_all.add_argument("root_dir", help="โฟลเดอร์ root ที่มีโฟลเดอร์ปี")
-    p_all.add_argument("--dry-run", action="store_true", help="แสดงคำสั่งแต่ไม่แก้ไฟล์จริง")
-    p_all.add_argument("--year", help="กรองเฉพาะปี เช่น 2022")
-    p_all.add_argument("--limit", type=int, help="จำกัดจำนวนไฟล์ (Phase 2)")
-    p_all.add_argument("--timezone", default="Asia/Bangkok",
-                        help="Timezone เช่น Asia/Bangkok (default), US/Eastern")
+    # All subcommand
+    p_all = subparsers.add_parser(
+        "all",
+        help="Execute all phases (scan, metadata, livephoto) in sequence"
+    )
+    p_all.add_argument(
+        "root_dir",
+        help="Root directory containing year folders from Google Takeout"
+    )
+    p_all.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show commands without modifying files"
+    )
+    p_all.add_argument(
+        "--year",
+        help="Filter by year (e.g., 2022)"
+    )
+    p_all.add_argument(
+        "--limit",
+        type=int,
+        help="Limit number of files to process (Phase 2)"
+    )
+    p_all.add_argument(
+        "--timezone",
+        default=DEFAULT_TIMEZONE,
+        help=f"Timezone for date conversion (default: {DEFAULT_TIMEZONE})"
+    )
     p_all.set_defaults(func=cmd_all)
 
-    # stats
-    p_stats = subparsers.add_parser("stats", help="แสดงสถิติ")
+    # Stats subcommand
+    p_stats = subparsers.add_parser(
+        "stats",
+        help="Display database statistics and summary"
+    )
     p_stats.set_defaults(func=cmd_stats)
 
-    # query
-    p_query = subparsers.add_parser("query", help="Query ข้อมูลในฐานข้อมูล")
-    p_query.add_argument("--unmatched", action="store_true", help="แสดงไฟล์ media ที่ไม่ได้จับคู่")
-    p_query.add_argument("--unmatched-json", action="store_true", help="แสดง JSON ที่ไม่มีไฟล์ media")
-    p_query.add_argument("--live-photos", action="store_true", help="แสดงคู่ Live Photo")
+    # Query subcommand
+    p_query = subparsers.add_parser(
+        "query",
+        help="Query and inspect data in the database"
+    )
+    p_query.add_argument(
+        "--unmatched",
+        action="store_true",
+        help="Show media files not matched with JSON metadata"
+    )
+    p_query.add_argument(
+        "--unmatched-json",
+        action="store_true",
+        help="Show JSON metadata with no matching media file"
+    )
+    p_query.add_argument(
+        "--live-photos",
+        action="store_true",
+        help="Show detected Live Photo pairs"
+    )
     p_query.set_defaults(func=cmd_query)
 
     args = parser.parse_args()
