@@ -21,6 +21,7 @@ Apple Live Photo ต้องการ:
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sqlite3
@@ -29,6 +30,46 @@ import uuid
 from typing import Optional
 
 from photo_db import get_connection, print_stats
+
+
+# regex จับ error "Not a valid X (looks more like a Y)"
+_LOOKS_LIKE_RE = re.compile(r"looks more like a (\w+)")
+
+_FORMAT_TO_EXT = {
+    "JPEG": ".jpg",
+    "PNG": ".png",
+    "HEIC": ".heic",
+    "TIFF": ".tiff",
+    "GIF": ".gif",
+    "MOV": ".mov",
+    "MP4": ".mp4",
+}
+
+
+def _rename_to_real_format(filepath: str, stderr_output: str) -> Optional[str]:
+    """ถ้า ExifTool บอกว่านามสกุลไม่ตรงกับเนื้อไฟล์จริง ให้เปลี่ยนนามสกุล"""
+    match = _LOOKS_LIKE_RE.search(stderr_output)
+    if not match:
+        return None
+
+    real_format = match.group(1).upper()
+    new_ext = _FORMAT_TO_EXT.get(real_format)
+    if not new_ext:
+        return None
+
+    base, old_ext = os.path.splitext(filepath)
+    if old_ext.lower() == new_ext:
+        return None
+
+    new_path = base + new_ext
+    if os.path.exists(new_path):
+        new_path = base + "_renamed" + new_ext
+
+    try:
+        os.rename(filepath, new_path)
+        return new_path
+    except OSError:
+        return None
 
 
 def progress(text: str):
@@ -123,29 +164,85 @@ def write_content_identifier(
     if dry_run:
         print(f"    [DRY RUN] {' '.join(img_cmd)}")
         print(f"    [DRY RUN] {' '.join(vid_cmd)}")
-        return True
+        return True, None, None
+
+    new_image_path = None
+    new_video_path = None
+
+    # ลบ temp file ค้างจากรอบก่อน (ถ้ามี)
+    for fp in (image_path, video_path):
+        tmp = fp + "_exiftool_tmp"
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
     # เขียนลงไฟล์ภาพ
     try:
         result = subprocess.run(img_cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            progress_error(f"  [!]  ExifTool error (ภาพ): {result.stderr.strip()}")
-            return False
+            stderr = result.stderr.strip()
+            # ลอง rename ถ้านามสกุลไม่ตรง
+            if "looks more like a" in stderr:
+                new_image_path = _rename_to_real_format(image_path, stderr)
+                if new_image_path:
+                    img_ext2 = os.path.splitext(new_image_path)[1].lower()
+                    if img_ext2 in (".heic", ".heif"):
+                        img_cmd2 = [
+                            "exiftool", "-overwrite_original",
+                            f"-MakerNotes:ContentIdentifier={content_id}",
+                            new_image_path,
+                        ]
+                    else:
+                        img_cmd2 = [
+                            "exiftool", "-overwrite_original",
+                            f"-MakerNotes:ContentIdentifier={content_id}",
+                            f"-ImageUniqueID={content_id}",
+                            new_image_path,
+                        ]
+                    result2 = subprocess.run(img_cmd2, capture_output=True, text=True, timeout=30)
+                    if result2.returncode != 0:
+                        progress_error(f"  [!]  ExifTool error (ภาพ retry): {result2.stderr.strip()}")
+                        return False, new_image_path, new_video_path
+                else:
+                    progress_error(f"  [!]  ExifTool error (ภาพ): {stderr}")
+                    return False, new_image_path, new_video_path
+            else:
+                progress_error(f"  [!]  ExifTool error (ภาพ): {stderr}")
+                return False, new_image_path, new_video_path
     except Exception as e:
         progress_error(f"  [!]  Error (ภาพ): {e}")
-        return False
+        return False, new_image_path, new_video_path
 
     # เขียนลงไฟล์วิดีโอ
     try:
         result = subprocess.run(vid_cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            progress_error(f"  [!]  ExifTool error (วิดีโอ): {result.stderr.strip()}")
-            return False
+            stderr = result.stderr.strip()
+            if "looks more like a" in stderr:
+                new_video_path = _rename_to_real_format(video_path, stderr)
+                if new_video_path:
+                    vid_cmd2 = [
+                        "exiftool", "-overwrite_original",
+                        f"-QuickTime:ContentIdentifier={content_id}",
+                        new_video_path,
+                    ]
+                    result2 = subprocess.run(vid_cmd2, capture_output=True, text=True, timeout=30)
+                    if result2.returncode != 0:
+                        progress_error(f"  [!]  ExifTool error (วิดีโอ retry): {result2.stderr.strip()}")
+                        return False, new_image_path, new_video_path
+                else:
+                    progress_error(f"  [!]  ExifTool error (วิดีโอ): {stderr}")
+                    return False, new_image_path, new_video_path
+            else:
+                progress_error(f"  [!]  ExifTool error (วิดีโอ): {stderr}")
+                return False, new_image_path, new_video_path
     except Exception as e:
         progress_error(f"  [!]  Error (วิดีโอ): {e}")
-        return False
+        return False, new_image_path, new_video_path
 
-    return True
+    return True, new_image_path, new_video_path
 
 
 def run_phase3(
@@ -234,7 +331,7 @@ def run_phase3(
         else:
             content_id = str(uuid.uuid4()).upper()
 
-        ok = write_content_identifier(
+        ok, new_img_path, new_vid_path = write_content_identifier(
             image_path, video_path, content_id, dry_run
         )
 
@@ -246,6 +343,26 @@ def run_phase3(
                     SET content_identifier = ?, assembled = 1
                     WHERE id = ?
                 """, (content_id, row["lp_id"]))
+
+                # อัปเดต database ถ้าไฟล์ถูก rename
+                if new_img_path:
+                    new_fn = os.path.basename(new_img_path)
+                    new_stem, new_ext = os.path.splitext(new_fn)
+                    cursor.execute("""
+                        UPDATE media_files
+                        SET filepath = ?, filename = ?, stem = ?, extension = ?
+                        WHERE filepath = ?
+                    """, (new_img_path, new_fn, new_stem,
+                          new_ext.lower(), image_path))
+                if new_vid_path:
+                    new_fn = os.path.basename(new_vid_path)
+                    new_stem, new_ext = os.path.splitext(new_fn)
+                    cursor.execute("""
+                        UPDATE media_files
+                        SET filepath = ?, filename = ?, stem = ?, extension = ?
+                        WHERE filepath = ?
+                    """, (new_vid_path, new_fn, new_stem,
+                          new_ext.lower(), video_path))
 
                 if i % 20 == 0:
                     conn.commit()
