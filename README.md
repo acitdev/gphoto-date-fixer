@@ -37,13 +37,41 @@ This toolkit solves both problems:
   choco install exiftool
   ```
 
+  Verify the installation:
+  ```bash
+  exiftool -ver
+  ```
+
 ## Installation
+
+> **macOS / Linux users:** use `python3` and `pip3` in place of `python` / `pip` throughout this guide to avoid accidentally using Python 2.
 
 ```bash
 git clone https://github.com/acitdev/gphoto-date-fixer.git
 cd gphoto-date-fixer
+```
+
+### Set up a virtual environment (recommended)
+
+Using a virtual environment keeps this project's dependencies isolated from your system Python and avoids the `externally-managed-environment` error on modern macOS (Homebrew Python) and recent Debian/Ubuntu releases.
+
+```bash
+# macOS / Linux
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Windows (PowerShell)
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+Once the virtual environment is active, install the Python dependencies:
+
+```bash
 pip install -r requirements.txt
 ```
+
+To leave the virtual environment later, run `deactivate`. The next time you use the tool, just `cd` into the project and run `source .venv/bin/activate` again before running any `python photos.py …` command.
 
 ### Configuration
 
@@ -175,6 +203,40 @@ After running Phase 3:
 2. Select both the image and its paired video file
 3. Drag them into Photos simultaneously
 4. Photos will automatically merge them into a Live Photo (because both files share the same `ContentIdentifier`)
+
+## Troubleshooting
+
+### `ModuleNotFoundError: No module named 'dotenv'` (or `PIL`, etc.)
+
+Python dependencies aren't installed in the interpreter you're running the script with. Most commonly this means you either skipped `pip install -r requirements.txt`, or you're running `python photos.py …` outside the virtual environment where the packages were installed.
+
+Fix:
+```bash
+cd /path/to/gphoto-date-fixer
+source .venv/bin/activate          # macOS / Linux
+pip install -r requirements.txt
+python photos.py scan /path/to/takeout
+```
+
+If you're not using a virtual environment and want to install into your user Python, make sure pip targets the same interpreter you launch with:
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+### `error: externally-managed-environment` (macOS Homebrew / recent Debian/Ubuntu)
+
+Newer Python builds refuse `pip install` into the system interpreter by design. The clean fix is to use a virtual environment as shown in the Installation section above. If you really need to install globally, you can override with:
+```bash
+python3 -m pip install -r requirements.txt --break-system-packages
+```
+
+### `exiftool: command not found`
+
+ExifTool isn't installed or isn't on your `PATH`. Re-run the install step from the Requirements section (`brew install exiftool` on macOS) and verify with `exiftool -ver`.
+
+### `command not found: python` on macOS
+
+macOS ships only `python3`, not `python`. Use `python3 photos.py …` instead, or activate the virtual environment — inside an active venv, `python` will resolve correctly.
 
 ## License
 
