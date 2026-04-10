@@ -103,13 +103,19 @@ def cmd_metadata(args):
     from zoneinfo import ZoneInfo
     from photo_metadata import run_phase2
     tz = ZoneInfo(args.timezone)
-    run_phase2(args.db, args.dry_run, args.year, args.limit, tz)
+    run_phase2(
+        args.db, args.dry_run, args.year, args.limit, tz,
+        verbose=args.verbose, log_file=args.log_file,
+    )
 
 
 def cmd_livephoto(args):
     """Phase 3: Assemble Live Photo pairs from separated image and video files."""
     from photo_livephoto import run_phase3
-    run_phase3(args.db, args.dry_run, args.year)
+    run_phase3(
+        args.db, args.dry_run, args.year,
+        verbose=args.verbose, log_file=args.log_file,
+    )
 
 
 def cmd_all(args):
@@ -124,11 +130,19 @@ def cmd_all(args):
     # Phase 2: Metadata
     from photo_metadata import run_phase2
     tz = ZoneInfo(args.timezone)
-    run_phase2(args.db, args.dry_run, args.year, args.limit, tz)
+    run_phase2(
+        args.db, args.dry_run, args.year, args.limit, tz,
+        verbose=args.verbose,
+        log_file=(args.log_file + ".metadata") if args.log_file else None,
+    )
 
     # Phase 3: Live Photo
     from photo_livephoto import run_phase3
-    run_phase3(args.db, args.dry_run, args.year)
+    run_phase3(
+        args.db, args.dry_run, args.year,
+        verbose=args.verbose,
+        log_file=(args.log_file + ".livephoto") if args.log_file else None,
+    )
 
     print("\n[X] All phases completed!")
 
@@ -283,6 +297,17 @@ Examples:
         default=DEFAULT_TIMEZONE,
         help=f"Timezone for date conversion (default: {DEFAULT_TIMEZONE})"
     )
+    p_meta.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print every ExifTool command in dry-run (noisy). "
+             "Without this flag dry-run shows only a progress bar."
+    )
+    p_meta.add_argument(
+        "--log-file",
+        help="Write every ExifTool command to the given file (one per line). "
+             "Recommended for reviewing a --dry-run after the fact."
+    )
     p_meta.set_defaults(func=cmd_metadata)
 
     # Live Photo subcommand
@@ -298,6 +323,15 @@ Examples:
     p_live.add_argument(
         "--year",
         help="Filter by year (e.g., 2022)"
+    )
+    p_live.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print every ExifTool command in dry-run (noisy)."
+    )
+    p_live.add_argument(
+        "--log-file",
+        help="Write every ExifTool command to the given file (one per line)."
     )
     p_live.set_defaults(func=cmd_livephoto)
 
@@ -328,6 +362,16 @@ Examples:
         "--timezone",
         default=DEFAULT_TIMEZONE,
         help=f"Timezone for date conversion (default: {DEFAULT_TIMEZONE})"
+    )
+    p_all.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print every ExifTool command in dry-run (noisy)."
+    )
+    p_all.add_argument(
+        "--log-file",
+        help="Write every ExifTool command to a file. Phases append .metadata / "
+             ".livephoto suffixes to the given path."
     )
     p_all.set_defaults(func=cmd_all)
 

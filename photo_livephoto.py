@@ -141,6 +141,8 @@ def write_content_identifier(
     video_path: str,
     content_id: str,
     dry_run: bool = False,
+    verbose: bool = False,
+    log_fh=None,
 ) -> tuple:
     """Embed ContentIdentifier into both image and video files.
 
@@ -149,6 +151,11 @@ def write_content_identifier(
         video_path: Path to video file (MP4/MOV)
         content_id: UUID to embed
         dry_run: Display commands without modifying files
+        verbose: If True, print the full ExifTool commands on their own lines
+            during dry-run. Without this flag dry-run stays silent and only
+            updates the shared progress bar.
+        log_fh: Optional open file handle. If provided, every ExifTool command
+            is appended to it (one per line).
 
     Returns:
         Tuple of (success: bool, new_image_path: Optional[str], new_video_path: Optional[str])
@@ -179,8 +186,14 @@ def write_content_identifier(
     ]
 
     if dry_run:
-        print(f"    [DRY RUN] {' '.join(img_cmd)}")
-        print(f"    [DRY RUN] {' '.join(vid_cmd)}")
+        img_str = " ".join(img_cmd)
+        vid_str = " ".join(vid_cmd)
+        if verbose:
+            progress_error(f"    [DRY RUN] {img_str}")
+            progress_error(f"    [DRY RUN] {vid_str}")
+        if log_fh:
+            log_fh.write(img_str + "\n")
+            log_fh.write(vid_str + "\n")
         return True, None, None
 
     new_image_path = None
@@ -262,6 +275,8 @@ def run_phase3(
     db_path: str = None,
     dry_run: bool = False,
     year_filter: Optional[str] = None,
+    verbose: bool = False,
+    log_file: Optional[str] = None,
 ):
     """Assemble all Live Photo pairs by embedding matching ContentIdentifiers.
 
@@ -269,6 +284,10 @@ def run_phase3(
         db_path: Path to SQLite database (uses DEFAULT_DB_PATH if not provided)
         dry_run: Display commands without modifying files
         year_filter: Filter to specific year (e.g., '2022')
+        verbose: If True, print every ExifTool command on its own line during
+            dry-run. Without this flag, dry-run shows only a progress bar.
+        log_file: Optional path to a file that will receive every ExifTool
+            command (one per line).
     """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
@@ -278,6 +297,10 @@ def run_phase3(
     print(f"   Database: {db_path}")
     if dry_run:
         print("   [*] DRY RUN MODE - Files will not be modified")
+    if verbose:
+        print("   [*] Verbose: ON")
+    if log_file:
+        print(f"   [*] Log file: {log_file}")
     if year_filter:
         print(f"   [*] Year filter: {year_filter}")
     print("=" * 50)
@@ -319,6 +342,17 @@ def run_phase3(
     success = 0
     failed = 0
 
+    log_fh = None
+    if log_file:
+        try:
+            log_fh = open(log_file, "w", encoding="utf-8")
+            log_fh.write(
+                f"# gphoto-date-fixer livephoto log ({'dry-run' if dry_run else 'live'})\n"
+            )
+        except OSError as e:
+            print(f"[!] Cannot open log file {log_file}: {e}")
+            log_fh = None
+
     for i, row in enumerate(rows, 1):
         image_path = row["image_path"]
         video_path = row["video_path"]
@@ -350,7 +384,8 @@ def run_phase3(
             content_id = str(uuid.uuid4()).upper()
 
         ok, new_img_path, new_vid_path = write_content_identifier(
-            image_path, video_path, content_id, dry_run
+            image_path, video_path, content_id, dry_run,
+            verbose=verbose, log_fh=log_fh,
         )
 
         if ok:
@@ -391,6 +426,13 @@ def run_phase3(
     progress(f"  [{total:,}/{total:,}] 100% Complete")
     print()
 
+    if log_fh:
+        try:
+            log_fh.close()
+            print(f"[*] ExifTool commands logged to: {log_file}")
+        except OSError:
+            pass
+
     print(f"\n[X] Success: {success:,} pairs")
     if failed > 0:
         print(f"[!]  Failed: {failed:,} pairs")
@@ -425,6 +467,18 @@ if __name__ == "__main__":
         "--year",
         help="Filter to specific year (e.g., 2022)"
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print every ExifTool command to the terminal during dry-run."
+    )
+    parser.add_argument(
+        "--log-file",
+        help="Write every ExifTool command to the given file (one per line)."
+    )
     args = parser.parse_args()
 
-    run_phase3(args.db, args.dry_run, args.year)
+    run_phase3(
+        args.db, args.dry_run, args.year,
+        verbose=args.verbose, log_file=args.log_file,
+    )

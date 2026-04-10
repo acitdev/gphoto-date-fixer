@@ -451,6 +451,8 @@ def run_phase2(
     year_filter: Optional[str] = None,
     limit: Optional[int] = None,
     tz: Optional[ZoneInfo] = None,
+    verbose: bool = False,
+    log_file: Optional[str] = None,
 ):
     """Run Phase 2: Write metadata back to all matched media files.
 
@@ -460,6 +462,12 @@ def run_phase2(
         year_filter: Optional year folder to filter (e.g., "2022").
         limit: Optional limit on number of files to process.
         tz: Timezone for time conversion. Defaults to DEFAULT_TIMEZONE env var.
+        verbose: If True, print every ExifTool command on its own line. In
+            dry-run mode this restores the noisy full-log behavior; without
+            this flag dry-run shows only the single-line progress bar.
+        log_file: Optional path to a file that will receive every ExifTool
+            command (one per line). Useful for reviewing a dry-run after the
+            fact without cluttering the terminal.
     """
     if db_path is None:
         db_path = DEFAULT_DB_PATH
@@ -471,6 +479,10 @@ def run_phase2(
     print(f"    Database: {db_path}")
     print(f"    Timezone: {tz or 'UTC'}")
     print(f"    Mode: {'batch (-stay_open)' if not dry_run else 'DRY RUN'}")
+    if verbose:
+        print("    Verbose: ON (per-file ExifTool commands will be printed)")
+    if log_file:
+        print(f"    Log file: {log_file}")
     if year_filter:
         print(f"    Year filter: {year_filter}")
     print("=" * 50)
@@ -515,6 +527,17 @@ def run_phase2(
     failed = 0
     renamed = 0
 
+    log_fh = None
+    if log_file:
+        try:
+            log_fh = open(log_file, "w", encoding="utf-8")
+            log_fh.write(
+                f"# gphoto-date-fixer metadata log ({'dry-run' if dry_run else 'live'})\n"
+            )
+        except OSError as e:
+            print(f"[!] Cannot open log file {log_file}: {e}")
+            log_fh = None
+
     with ExifToolBatch() as et:
         for i, row in enumerate(rows, 1):
             filepath = row["filepath"]
@@ -556,7 +579,11 @@ def run_phase2(
                     filepath, timestamp, row["latitude"], row["longitude"],
                     row["altitude"], is_video, tz,
                 )
-                progress_error(f"  [DRY RUN] exiftool {' '.join(args)}")
+                cmd_str = "exiftool " + " ".join(args)
+                if verbose:
+                    progress_error(f"  [DRY RUN] {cmd_str}")
+                if log_fh:
+                    log_fh.write(cmd_str + "\n")
                 success += 1
                 continue
 
@@ -599,6 +626,13 @@ def run_phase2(
     progress(f"  [{total:,}/{total:,}] 100% Complete")
     print()
 
+    if log_fh:
+        try:
+            log_fh.close()
+            print(f"[*] ExifTool commands logged to: {log_file}")
+        except OSError:
+            pass
+
     print(f"\n[X] Success: {success:,} files")
     if renamed > 0:
         print(f"[*] Renamed to correct format: {renamed:,} files")
@@ -639,7 +673,21 @@ if __name__ == "__main__":
         default=DEFAULT_TIMEZONE,
         help=f"Timezone for time conversion (default: {DEFAULT_TIMEZONE})"
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print every ExifTool command to the terminal (noisy). "
+             "Without this flag, dry-run shows only a progress bar."
+    )
+    parser.add_argument(
+        "--log-file",
+        help="Write every ExifTool command to the given file (one per line). "
+             "Useful for reviewing a --dry-run after the fact."
+    )
     args = parser.parse_args()
 
     tz = ZoneInfo(args.timezone)
-    run_phase2(args.db, args.dry_run, args.year, args.limit, tz)
+    run_phase2(
+        args.db, args.dry_run, args.year, args.limit, tz,
+        verbose=args.verbose, log_file=args.log_file,
+    )

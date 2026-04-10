@@ -112,7 +112,7 @@ python photos.py scan /path/to/takeout
 Writes timestamps and GPS coordinates back into image/video files using ExifTool. Also updates OS-level file dates.
 
 ```bash
-python photos.py metadata --dry-run       # Preview changes
+python photos.py metadata --dry-run       # Preview changes (quiet progress bar)
 python photos.py metadata                 # Write metadata
 python photos.py metadata --year 2023     # Process specific year only
 python photos.py metadata --limit 100     # Process first 100 files
@@ -124,9 +124,31 @@ python photos.py metadata --timezone US/Eastern  # Override timezone
 Embeds `ContentIdentifier` UUIDs into image+video pairs so Apple Photos recognizes them as Live Photos.
 
 ```bash
-python photos.py livephoto --dry-run      # Preview changes
+python photos.py livephoto --dry-run      # Preview changes (quiet progress bar)
 python photos.py livephoto                # Write identifiers
 python photos.py livephoto --year 2024    # Process specific year
+```
+
+### Dry-Run Output Control
+
+By default, `--dry-run` shows only a single-line progress bar (the same style as `scan`) and a summary at the end — it no longer floods the terminal with one line per file. Two flags let you see more when you need to:
+
+```bash
+# Quiet progress bar only (default)
+python photos.py metadata --dry-run
+
+# Write every ExifTool command to a log file for later review
+python photos.py metadata --dry-run --log-file metadata-preview.log
+
+# Stream every ExifTool command to the terminal (noisy — old behavior)
+python photos.py metadata --dry-run --verbose
+```
+
+The same `--verbose` and `--log-file` flags are available on `livephoto` and `all`. For the `all` command, each phase writes to its own file, created by appending `.metadata` and `.livephoto` to the path you pass:
+
+```bash
+python photos.py all ~/Takeout --dry-run --log-file preview.log
+# → preview.log.metadata + preview.log.livephoto
 ```
 
 ### Utilities
@@ -237,6 +259,10 @@ ExifTool isn't installed or isn't on your `PATH`. Re-run the install step from t
 ### `command not found: python` on macOS
 
 macOS ships only `python3`, not `python`. Use `python3 photos.py …` instead, or activate the virtual environment — inside an active venv, `python` will resolve correctly.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the list of notable changes between releases.
 
 ## License
 
